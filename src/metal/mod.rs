@@ -1,5 +1,5 @@
 // Create a new module structure
-pub mod kernel;
+pub(crate) mod kernel;
 mod mining;
 mod safety_wrappers;
 mod setup;

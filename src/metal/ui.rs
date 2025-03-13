@@ -6,7 +6,7 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use terminal_size::{terminal_size, Height};
 
-pub struct UiManager {
+pub(super) struct UiManager {
     term: Arc<Term>,
     found: Arc<Mutex<u64>>,
     found_list: Arc<Mutex<Vec<String>>>,
@@ -19,7 +19,7 @@ pub struct UiManager {
 }
 
 impl UiManager {
-    pub fn new(
+    pub(super) fn new(
         term: Arc<Term>,
         found: Arc<Mutex<u64>>,
         found_list: Arc<Mutex<Vec<String>>>,
@@ -46,23 +46,23 @@ impl UiManager {
         }
     }
 
-    pub fn get_start_time(&self) -> f64 {
+    pub(super) fn get_start_time(&self) -> f64 {
         self.start_time
     }
 
-    pub fn get_rate(&self) -> Arc<Mutex<f64>> {
+    pub(super) fn get_rate(&self) -> Arc<Mutex<f64>> {
         self.rate.clone()
     }
 
-    pub fn get_cumulative_nonce(&self) -> Arc<Mutex<u64>> {
+    pub(super) fn get_cumulative_nonce(&self) -> Arc<Mutex<u64>> {
         self.cumulative_nonce.clone()
     }
 
-    pub fn get_previous_time(&self) -> Arc<Mutex<f64>> {
+    pub(super) fn get_previous_time(&self) -> Arc<Mutex<f64>> {
         self.previous_time.clone()
     }
 
-    pub fn start_ui_thread(&self) -> thread::JoinHandle<()> {
+    pub(super) fn start_ui_thread(&self) -> thread::JoinHandle<()> {
         let term_clone = self.term.clone();
         let found_clone = self.found.clone();
         let found_list_clone = self.found_list.clone();

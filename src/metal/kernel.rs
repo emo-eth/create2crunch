@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 static KERNEL_SRC: &str = include_str!("../kernels/keccak256.metal");
 
 /// Function to generate Metal kernel source with the appropriate constants
-pub fn mk_metal_src(config: &Config) -> String {
+pub(crate) fn mk_metal_src(config: &Config) -> String {
     let mut src = String::with_capacity(2048 + KERNEL_SRC.len());
 
     let factory = config.factory_address.iter();

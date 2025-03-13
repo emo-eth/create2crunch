@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use tiny_keccak::{Hasher, Keccak};
 
-pub struct SolutionProcessor {
+pub(super) struct SolutionProcessor {
     config: Config,
     rewards: Arc<Reward>,
     found: Arc<Mutex<u64>>,
@@ -16,7 +16,7 @@ pub struct SolutionProcessor {
 }
 
 impl SolutionProcessor {
-    pub fn new(
+    pub(super) fn new(
         config: Config,
         rewards: Arc<Reward>,
         found: Arc<Mutex<u64>>,
@@ -31,11 +31,11 @@ impl SolutionProcessor {
         }
     }
 
-    pub fn get_processed_solutions(&self) -> Arc<Mutex<HashSet<String>>> {
+    pub(super) fn get_processed_solutions(&self) -> Arc<Mutex<HashSet<String>>> {
         self.processed_solutions.clone()
     }
 
-    pub fn process_solution(&self, salt: &[u8], solution: u64) -> bool {
+    pub(super) fn process_solution(&self, salt: &[u8], solution: u64) -> bool {
         // Convert the 64-bit solution to bytes (8 bytes total)
         let solution_bytes = solution.to_le_bytes();
 

@@ -3,7 +3,7 @@ use crate::Config;
 use metal::*;
 use std::error::Error;
 
-pub struct MetalContext {
+pub(super) struct MetalContext {
     pub device: Device,
     pub command_queue: CommandQueue,
     pub pipeline_state: ComputePipelineState,
@@ -19,7 +19,7 @@ pub struct MetalContext {
     pub max_solutions: usize,
 }
 
-pub fn initialize_metal(config: &Config, work_size: u64) -> Result<MetalContext, Box<dyn Error>> {
+pub(super) fn initialize_metal(config: &Config, work_size: u64) -> Result<MetalContext, Box<dyn Error>> {
     // Get the default Metal device
     let devices = Device::all();
     if devices.is_empty() {

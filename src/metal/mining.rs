@@ -1,16 +1,13 @@
 use crate::{Config, Reward};
 use alloy_primitives::FixedBytes;
 use console::Term;
-use metal::*;
 use rand::{thread_rng, Rng, RngCore};
-use std::collections::HashSet;
 use std::error::Error;
 use std::sync::{Arc, Mutex};
-use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::safety_wrappers::{SafeBlitEncoder, SafeEncoder};
-use super::setup::{initialize_metal, MetalContext};
+use super::safety_wrappers::SafeEncoder;
+use super::setup::initialize_metal;
 use super::solution::SolutionProcessor;
 use super::ui::UiManager;
 
@@ -206,7 +203,7 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
         // validate the command buffers do not all start with 02
 
         // Wait for all command buffers to complete and process results
-        let mut command_buffers_to_process = command_buffers;
+        let command_buffers_to_process = command_buffers;
 
         for (buffer_idx, (buffer, salt, original_idx)) in
             command_buffers_to_process.into_iter().enumerate()
