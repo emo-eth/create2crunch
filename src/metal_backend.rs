@@ -192,6 +192,9 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     // the previous timestamp of printing to the terminal
     let previous_time = Arc::new(Mutex::new(0.0f64));
 
+    // Global counter for base nonce to ensure uniqueness across command buffers
+    let global_nonce_counter = Arc::new(Mutex::new(0u32));
+
     // Create buffers once outside the main loop with optimized storage modes
     // Use private storage for better performance on discrete GPUs
     let resource_options = if device.has_unified_memory() {
@@ -345,19 +348,23 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
                 }
             }
 
-            // reset nonce & initialize it to a random value for better distribution
-            let mut nonce: [u32; 1] = rng.gen();
+            // Get a unique base nonce for this command buffer
+            let base_nonce = {
+                let mut counter = global_nonce_counter.lock().unwrap();
+                *counter += 1;
+                *counter
+            };
 
-            // Update nonce buffer contents
+            // Update nonce buffer with the sequential base nonce
             if let Some(staging) = &staging_nonce_buffer {
                 let nonce_ptr = staging.contents() as *mut u32;
                 unsafe {
-                    *nonce_ptr = nonce[0];
+                    *nonce_ptr = base_nonce;
                 }
             } else {
                 let nonce_ptr = nonce_buffer.contents() as *mut u32;
                 unsafe {
-                    *nonce_ptr = nonce[0];
+                    *nonce_ptr = base_nonce;
                 }
             }
 
@@ -507,60 +514,75 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
                     // get the address that results from the hash
                     let address = <&Address>::try_from(&res[12..]).unwrap();
 
-                    // count total and leading zero bytes
-                    let mut total = 0;
-                    let mut leading = 0;
-                    for (i, &b) in address.iter().enumerate() {
-                        if b == 0 {
-                            total += 1;
-                        } else if leading == 0 {
-                            // set leading on finding non-zero byte
-                            leading = i;
+                    // Count zero bytes in the address (20 bytes)
+                    // This needs to match the Metal kernel's logic
+                    let mut total_zeroes = 0;
+                    let mut leading_zeroes = 0;
+                    let mut still_leading = true;
+
+                    for &byte in address.iter() {
+                        if byte == 0 {
+                            total_zeroes += 1;
+                            if still_leading {
+                                leading_zeroes += 1;
+                            }
+                        } else {
+                            still_leading = false;
                         }
                     }
 
-                    let key = leading * 20 + total;
-                    let reward = rewards.get(&key).unwrap_or("0");
-                    let output = format!(
-                        "0x{}{}{} => {} => {}",
-                        hex::encode(&config.calling_address),
-                        hex::encode(salt),
-                        hex::encode(solution_bytes),
-                        address,
-                        reward,
-                    );
+                    // Verify this is actually a solution according to our criteria
+                    let meets_leading_criteria =
+                        leading_zeroes >= config.leading_zeroes_threshold as usize;
+                    let meets_total_criteria =
+                        total_zeroes >= config.total_zeroes_threshold as usize;
 
-                    let show = format!("{output} ({leading} / {total})");
+                    // Only process if it meets either criteria
+                    if meets_leading_criteria || meets_total_criteria {
+                        // Use the correct leading count for key and display
+                        let key = leading_zeroes * 20 + total_zeroes;
+                        let reward = rewards.get(&key).unwrap_or("0");
+                        let output = format!(
+                            "0x{}{}{} => {} => {}",
+                            hex::encode(&config.calling_address),
+                            hex::encode(salt),
+                            hex::encode(solution_bytes),
+                            address,
+                            reward,
+                        );
 
-                    // Update found count and list
-                    {
-                        let mut found_list_guard = found_list.lock().unwrap();
-                        found_list_guard.push(show.to_string());
-                    }
+                        let show = format!("{output} ({leading_zeroes} / {total_zeroes})");
 
-                    // Write to file using a different approach
-                    {
-                        // Spawn a thread to handle file writing to avoid blocking the main thread
-                        let output_to_write = output.clone();
-                        thread::spawn(move || {
-                            // Use OpenOptions to open the file in append mode
-                            if let Ok(mut file) = std::fs::OpenOptions::new()
-                                .append(true)
-                                .open("efficient_addresses.txt")
-                            {
-                                // Write to the file
-                                if let Err(e) = writeln!(file, "{}", output_to_write) {
-                                    eprintln!("Error writing to file: {}", e);
+                        // Update found count and list
+                        {
+                            let mut found_list_guard = found_list.lock().unwrap();
+                            found_list_guard.push(show.to_string());
+                        }
+
+                        // Write to file using a different approach
+                        {
+                            // Spawn a thread to handle file writing to avoid blocking the main thread
+                            let output_to_write = output.clone();
+                            thread::spawn(move || {
+                                // Use OpenOptions to open the file in append mode
+                                if let Ok(mut file) = std::fs::OpenOptions::new()
+                                    .append(true)
+                                    .open("efficient_addresses.txt")
+                                {
+                                    // Write to the file
+                                    if let Err(e) = writeln!(file, "{}", output_to_write) {
+                                        eprintln!("Error writing to file: {}", e);
+                                    }
+                                } else {
+                                    eprintln!("Error opening file for writing");
                                 }
-                            } else {
-                                eprintln!("Error opening file for writing");
-                            }
-                        });
-                    }
+                            });
+                        }
 
-                    // Increment found counter
-                    let mut found_guard = found.lock().unwrap();
-                    *found_guard += 1;
+                        // Increment found counter
+                        let mut found_guard = found.lock().unwrap();
+                        *found_guard += 1;
+                    }
                 }
             }
         }
