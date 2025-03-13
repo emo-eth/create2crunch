@@ -4,6 +4,12 @@ pub struct Reward {
     reward: FxHashMap<usize, &'static str>,
 }
 
+impl Default for Reward {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Reward {
     pub fn new() -> Self {
         let reward = FxHashMap::from_iter([

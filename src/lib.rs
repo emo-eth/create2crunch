@@ -25,6 +25,9 @@ pub use reward::Reward;
 #[cfg(feature = "metal")]
 pub mod metal_backend;
 
+#[cfg(test)]
+mod differential_test;
+
 // workset size (tweak this!)
 const WORK_SIZE: u32 = 0x4000000; // max. 0x15400000 to abs. max 0xffffffff
 
@@ -591,7 +594,7 @@ fn output_file() -> File {
 
 /// Creates the OpenCL kernel source code by populating the template with the
 /// values from the Config object.
-fn mk_kernel_src(config: &Config) -> String {
+pub fn mk_kernel_src(config: &Config) -> String {
     let mut src = String::with_capacity(2048 + KERNEL_SRC.len());
 
     let factory = config.factory_address.iter();

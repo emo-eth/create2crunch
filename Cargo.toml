@@ -3,7 +3,8 @@ name = "create2crunch"
 version = "0.3.0"
 authors = ["0age <0age@protonmail.com"]
 edition = "2021"
-rust-version = "1.65"
+rust-version = "1.85"
+default-run = "create2crunch"
 
 [dependencies]
 alloy-primitives = { version = "0.5", features = ["rand"] }
@@ -19,6 +20,10 @@ separator = "0.4.1"
 terminal_size = "0.3.0"
 tiny-keccak = "2.0"
 clap = { version = "4.3.24", features = ["derive"] }
+
+[[bin]]
+name = "list_metal_devices"
+path = "src/list_metal_devices.rs"
 
 [profile.release]
 opt-level = 3

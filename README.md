@@ -65,6 +65,15 @@ The program requires the following arguments:
 6. `total_zeroes_threshold` (optional): Minimum number of total zero bytes to search for (default: 5)
 7. `backend` (optional): GPU backend to use - "opencl", "metal", or "auto" (default: "auto")
 
+### Useful variables
+
+```sh
+export KEYLESS_CREATE2_FACTORY=0x4e59b44847b379578588920ca78fbf26c0b4956c
+export IMMUTABLE_CREATE2_FACTORY=0x0000000000FFe8B47B3e2130213B802212439497
+export PERMISSIONLESS_CALLER_ADDRESS=0x0000000000000000000000000000000000000000
+export DUMMY_INIT_CODE_HASH=0x0000000000000000000000000000000000000000000000000000000000000000
+```
+
 #### Basic CPU Usage
 
 ```sh
@@ -137,6 +146,16 @@ For each efficient address found, the program will:
 
 The value represents the approximate rarity of the address based on the number of leading and total zero bytes.
 
+### Runtime Behavior
+
+The program will run indefinitely until manually stopped, continuously searching for addresses that meet the specified criteria. You can:
+
+1. Stop the program at any time by pressing `Ctrl+C` in your terminal
+2. Check the `efficient_addresses.txt` file for found addresses even while the program is running
+3. Resume searching later - all found addresses are saved to the file as they're discovered
+
+The longer the program runs, the more addresses it will find, with some being rarer (and thus more valuable) than others.
+
 ### Monitoring
 
 A simple monitoring tool is available to track progress:
@@ -163,6 +182,16 @@ Metal is Apple's GPU programming framework and is generally more efficient than 
 3. Specify "metal" as the backend or use "auto" to let the program choose
 
 On macOS, the auto-detect option will prefer Metal if available.
+
+#### Finding Your Metal GPU Device ID
+
+To find the available Metal GPU devices on your system and their corresponding device IDs, run:
+
+```sh
+cargo run --bin list_metal_devices --features metal
+```
+
+This will display a list of all available Metal devices with their device IDs, which you can use with the `--gpu-device` parameter. For most Mac systems with a single GPU, the device ID will be 0.
 
 ## Troubleshooting
 
