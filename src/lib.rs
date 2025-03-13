@@ -2,16 +2,14 @@
 #![deny(unused_must_use, rust_2018_idioms)]
 
 use alloy_primitives::{hex, Address, FixedBytes};
-use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use clap::Parser;
 use console::Term;
 use fs4::FileExt;
 #[cfg(feature = "opencl")]
-use ocl::{Buffer, Context, Device, Kernel, MemFlags, Platform, ProQue, Program, Queue};
+use ocl::{Buffer, Context, Device, MemFlags, Platform, Program, Queue};
 use rand::{thread_rng, Rng};
 use rayon::prelude::*;
 use separator::Separatable;
-use std::env;
 use std::error::Error;
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
@@ -19,14 +17,16 @@ use std::io::prelude::*;
 use std::io::{self, BufRead};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
-use terminal_size::{terminal_size, Height};
 use tiny_keccak::{Hasher, Keccak};
 
 mod reward;
 pub use reward::Reward;
 
 #[cfg(feature = "metal")]
-pub mod metal_backend;
+mod metal;
+
+#[cfg(feature = "metal")]
+pub use metal::metal_gpu;
 
 #[cfg(feature = "metal")]
 pub mod optimize;
@@ -77,7 +77,7 @@ impl std::str::FromStr for GpuBackend {
 /// of three optional values may be provided: a device to target for OpenCL GPU
 /// search, a threshold for leading zeroes to search for, and a threshold for
 /// total zeroes to search for.
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, Clone)]
 #[command(author, version, about, long_about = None)]
 pub struct Config {
     /// The address of the contract that will call CREATE2 (hex without 0x prefix)
@@ -535,7 +535,7 @@ pub fn opencl_gpu(config: Config) -> Result<(), Box<dyn Error>> {
             let reward = rewards.get(&key).unwrap_or("0");
             let output = format!(
                 "0x{}{}{} => {} => {}",
-                hex::encode(&config.calling_address),
+                hex::encode(config.calling_address),
                 hex::encode(salt),
                 hex::encode(solution_bytes),
                 address,

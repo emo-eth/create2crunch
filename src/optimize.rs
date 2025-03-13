@@ -1,6 +1,5 @@
-use crate::{Config, Reward, CONTROL_CHARACTER};
-use alloy_primitives::{hex, Address, FixedBytes};
-use byteorder::{BigEndian, ByteOrder, LittleEndian};
+use crate::Config;
+use alloy_primitives::FixedBytes;
 use metal::*;
 use rand::{thread_rng, Rng};
 use std::error::Error;
@@ -8,9 +7,7 @@ use std::fmt::Write as _;
 use std::fs::File;
 use std::io::Write as IoWrite;
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use tiny_keccak::{Hasher, Keccak};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 // Safety wrapper for ComputeCommandEncoder to prevent context leaks
 struct SafeEncoder<'a> {
@@ -115,7 +112,7 @@ pub fn benchmark_configuration(
     let command_queue = device.new_command_queue_with_max_command_buffer_count(64);
 
     // Compile the Metal kernel
-    let metal_src = crate::metal_backend::mk_metal_src(&config);
+    let metal_src = crate::metal::kernel::mk_metal_src(config);
     let options = CompileOptions::new();
 
     let library = device
@@ -258,7 +255,7 @@ pub fn benchmark_configuration(
 
             // Create compute command encoder with safety wrapper
             let mut compute_encoder =
-                SafeEncoder::new(&command_buffer.new_compute_command_encoder());
+                SafeEncoder::new(command_buffer.new_compute_command_encoder());
 
             // Set compute pipeline
             compute_encoder
@@ -268,19 +265,19 @@ pub fn benchmark_configuration(
             // Copy from staging buffers if needed
             if let Some(staging) = &staging_message_buffer {
                 let mut blit_encoder =
-                    SafeBlitEncoder::new(&command_buffer.new_blit_command_encoder());
+                    SafeBlitEncoder::new(command_buffer.new_blit_command_encoder());
                 blit_encoder
                     .encoder
-                    .copy_from_buffer(&staging, 0, &message_buffer, 0, 4);
+                    .copy_from_buffer(staging, 0, &message_buffer, 0, 4);
                 blit_encoder.end_encoding();
             }
 
             if let Some(staging) = &staging_nonce_buffer {
                 let mut blit_encoder =
-                    SafeBlitEncoder::new(&command_buffer.new_blit_command_encoder());
+                    SafeBlitEncoder::new(command_buffer.new_blit_command_encoder());
                 blit_encoder
                     .encoder
-                    .copy_from_buffer(&staging, 0, &nonce_buffer, 0, 4);
+                    .copy_from_buffer(staging, 0, &nonce_buffer, 0, 4);
                 blit_encoder.end_encoding();
             }
 
@@ -411,7 +408,7 @@ pub fn grid_search(config: &Config, duration_seconds: u64) -> Result<(), Box<dyn
                         // Update best if improved
                         if best_result
                             .as_ref()
-                            .map_or(true, |best| result.hash_rate > best.hash_rate)
+                            .is_none_or(|best| result.hash_rate > best.hash_rate)
                         {
                             println!(
                                 "New best: {:.2} MH/s with work_size={}, threadgroup={}, buffers={}",
@@ -621,7 +618,7 @@ pub fn two_phase_optimization(config: &Config) -> Result<(), Box<dyn Error>> {
                     Ok(result) => {
                         if best_result
                             .as_ref()
-                            .map_or(true, |best| result.hash_rate > best.hash_rate)
+                            .is_none_or(|best| result.hash_rate > best.hash_rate)
                         {
                             println!(
                                 "New best: {:.2} MH/s with work_size={}, threadgroup={}, buffers={}",

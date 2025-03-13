@@ -108,7 +108,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         GpuBackend::Metal => {
             #[cfg(feature = "metal")]
             {
-                create2crunch::metal_backend::metal_gpu(config)?;
+                create2crunch::metal_gpu(config)?;
             }
             #[cfg(not(feature = "metal"))]
             {

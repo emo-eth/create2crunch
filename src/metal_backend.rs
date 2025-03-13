@@ -1,10 +1,8 @@
-use crate::{Config, Reward, CONTROL_CHARACTER, WORK_SIZE};
+use crate::{Config, Reward, CONTROL_CHARACTER};
 use alloy_primitives::{hex, Address, FixedBytes};
-use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use console::Term;
-use fs4::FileExt;
 use metal::*;
-use rand::{thread_rng, Rng};
+use rand::{thread_rng, Rng, RngCore};
 use separator::Separatable;
 use std::collections::HashSet;
 use std::error::Error;
@@ -176,6 +174,10 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     // Calculate grid size based on work size, ensuring it's a multiple of threadgroup size
     let grid_size = MTLSize::new(work_size, 1, 1);
 
+    // Global counter for base nonce to ensure uniqueness across command buffers
+    // Using u32 since the Metal kernel only uses a 32-bit value for the second part of the nonce
+    let global_nonce_counter = Arc::new(Mutex::new(0u32));
+
     // create a random number generator
     let mut rng = thread_rng();
 
@@ -191,9 +193,6 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
 
     // the previous timestamp of printing to the terminal
     let previous_time = Arc::new(Mutex::new(0.0f64));
-
-    // Global counter for base nonce to ensure uniqueness across command buffers
-    let global_nonce_counter = Arc::new(Mutex::new(0u32));
 
     // Create buffers once outside the main loop with optimized storage modes
     // Use private storage for better performance on discrete GPUs
@@ -240,9 +239,9 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
 
     // Create a separate thread for UI updates to avoid blocking mining
     // Note: We need to manually copy the config fields since it doesn't implement Clone
-    let factory_address = config.factory_address.clone();
-    let calling_address = config.calling_address.clone();
-    let init_code_hash = config.init_code_hash.clone();
+    let factory_address = config.factory_address;
+    let calling_address = config.calling_address;
+    let init_code_hash = config.init_code_hash;
     let leading_zeroes_threshold = config.leading_zeroes_threshold;
     let total_zeroes_threshold = config.total_zeroes_threshold;
     let processed_solutions_clone = processed_solutions.clone();
@@ -270,7 +269,7 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
             *prev_time = current_time;
 
             // Clear the terminal screen
-            if let Err(_) = term_clone.clear_screen() {
+            if term_clone.clear_screen().is_err() {
                 continue; // Skip this update if we can't clear the screen
             }
 
@@ -311,6 +310,14 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
                 *found_clone.lock().unwrap()
             ));
 
+            // display information about the optimized search strategy
+            let _ = term_clone.write_line(&format!(
+                "search strategy: 4-byte salt (buffer_id + random) | 8-byte nonce (hierarchical_thread_id + counter_nonce)\t\t\
+                 threshold: {} leading or {} total zeroes",
+                leading_zeroes_threshold,
+                total_zeroes_threshold
+            ));
+
             // display recently found solutions based on terminal height
             let rows = if height < 5 { 1 } else { height as usize - 4 };
             let found_list_guard = found_list_clone.lock().unwrap();
@@ -333,7 +340,16 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
         for buffer_idx in 0..num_parallel_buffers {
             // Generate a completely unique random salt for each command buffer
             // This ensures different command buffers work on completely different salt spaces
-            let salt = FixedBytes::<4>::random();
+            // Include the buffer index in the salt to ensure uniqueness
+            let mut salt_bytes = [0u8; 4];
+            rng.fill_bytes(&mut salt_bytes);
+
+            // Incorporate buffer index into the salt to ensure uniqueness across parallel buffers
+            // Use the lower bits for the buffer index (up to 64 parallel buffers = 6 bits)
+            // and the upper bits for random entropy
+            salt_bytes[0] = buffer_idx as u8;
+
+            let salt = FixedBytes::<4>::from_slice(&salt_bytes);
 
             // Update message buffer contents with the unique salt
             if let Some(staging) = &staging_message_buffer {
@@ -349,13 +365,23 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
             }
 
             // Get a unique base nonce for this command buffer
+            // We use a counter combined with random values to ensure uniqueness
+            // and complement the hierarchical thread ID approach in the kernel
             let base_nonce = {
                 let mut counter = global_nonce_counter.lock().unwrap();
-                *counter += 1;
-                *counter
+
+                // Increment the counter to ensure uniqueness
+                *counter = counter.wrapping_add(1);
+
+                // Use the counter in the upper bits that aren't used by the thread ID
+                // This ensures no overlap between different command buffers
+                // The thread ID uses 16 bits for group ID and 16 bits for local ID
+                // So we'll use the upper 16 bits for the counter and lower 16 for random entropy
+                (*counter << 16) | (rng.gen::<u32>() & 0xFFFF)
             };
 
-            // Update nonce buffer with the sequential base nonce
+            // Update nonce buffer with the base nonce
+            // The kernel will combine this with the hierarchical thread ID to form a unique 64-bit nonce
             if let Some(staging) = &staging_nonce_buffer {
                 let nonce_ptr = staging.contents() as *mut u32;
                 unsafe {
@@ -377,7 +403,7 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
             // Create command buffer and encoder
             let command_buffer = command_queue.new_command_buffer();
             let mut compute_encoder =
-                SafeEncoder::new(&command_buffer.new_compute_command_encoder());
+                SafeEncoder::new(command_buffer.new_compute_command_encoder());
 
             // Set compute pipeline
             compute_encoder
@@ -387,19 +413,19 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
             // Copy from staging buffers if needed
             if let Some(staging) = &staging_message_buffer {
                 let mut blit_encoder =
-                    SafeBlitEncoder::new(&command_buffer.new_blit_command_encoder());
+                    SafeBlitEncoder::new(command_buffer.new_blit_command_encoder());
                 blit_encoder
                     .encoder
-                    .copy_from_buffer(&staging, 0, &message_buffer, 0, 4);
+                    .copy_from_buffer(staging, 0, &message_buffer, 0, 4);
                 blit_encoder.end_encoding();
             }
 
             if let Some(staging) = &staging_nonce_buffer {
                 let mut blit_encoder =
-                    SafeBlitEncoder::new(&command_buffer.new_blit_command_encoder());
+                    SafeBlitEncoder::new(command_buffer.new_blit_command_encoder());
                 blit_encoder
                     .encoder
-                    .copy_from_buffer(&staging, 0, &nonce_buffer, 0, 4);
+                    .copy_from_buffer(staging, 0, &nonce_buffer, 0, 4);
                 blit_encoder.end_encoding();
             }
 
@@ -469,11 +495,13 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
                         continue;
                     }
 
+                    // Convert the 64-bit solution to bytes (8 bytes total)
+                    // This contains the full nonce with all bytes properly utilized
                     let solution_bytes = solution.to_le_bytes();
 
                     // Create a unique identifier for this solution
                     let solution_id =
-                        format!("{}{}", hex::encode(&salt[..]), hex::encode(&solution_bytes));
+                        format!("{}{}", hex::encode(&salt[..]), hex::encode(solution_bytes));
 
                     // Check if we've already processed this solution
                     let mut processed_guard = processed_solutions.lock().unwrap();
@@ -544,7 +572,7 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
                         let reward = rewards.get(&key).unwrap_or("0");
                         let output = format!(
                             "0x{}{}{} => {} => {}",
-                            hex::encode(&config.calling_address),
+                            hex::encode(config.calling_address),
                             hex::encode(salt),
                             hex::encode(solution_bytes),
                             address,

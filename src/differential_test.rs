@@ -183,7 +183,7 @@ fn run_single_hash_metal(
     let command_queue = device.new_command_queue();
 
     // Prepare kernel source
-    let kernel_src = crate::metal_backend::mk_metal_src(config);
+    let kernel_src = crate::metal::kernel::mk_metal_src(config);
 
     // Create Metal library and function
     let options = CompileOptions::new();
@@ -235,7 +235,7 @@ fn run_single_hash_metal(
     // Create command buffer and encoder
     let command_buffer = command_queue.new_command_buffer();
     let compute_encoder = command_buffer.new_compute_command_encoder();
-    let mut safe_encoder = SafeEncoder::new(&compute_encoder);
+    let mut safe_encoder = SafeEncoder::new(compute_encoder);
 
     // Set pipeline state and buffers
     safe_encoder
