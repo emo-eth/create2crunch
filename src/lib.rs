@@ -27,9 +27,9 @@ pub use reward::Reward;
 // #[cfg(feature = "metal")]
 // pub use metal::metal_gpu;
 #[cfg(feature = "metal")]
-mod metal_backend2;
+mod metal_backend;
 #[cfg(feature = "metal")]
-pub use metal_backend2::metal_gpu;
+pub use metal_backend::metal_gpu;
 
 #[cfg(feature = "metal")]
 pub mod optimize;

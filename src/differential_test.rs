@@ -183,7 +183,7 @@ fn run_single_hash_metal(
     let command_queue = device.new_command_queue();
 
     // Prepare kernel source
-    let kernel_src = crate::metal_backend2::mk_metal_src(config);
+    let kernel_src = crate::metal_backend::mk_metal_src(config);
 
     // Create Metal library and function
     let options = CompileOptions::new();
@@ -328,25 +328,138 @@ fn compute_full_hash(
     Ok(hash)
 }
 
+// Extract Ethereum address from a Keccak-256 hash
+fn extract_address_from_hash(hash: &[u8; 32]) -> String {
+    // Ethereum addresses are the last 20 bytes of the hash
+    let address_bytes = &hash[12..32];
+    format!("0x{}", hex::encode(address_bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{Config, GpuBackend};
+    use hex_literal::hex;
 
-    // Helper function to create a test config
+    // Helper function to create a test config with the exact values used in the command
     fn create_test_config() -> Config {
+        // Use the values from the command:
+        // cargo run --features metal -- --factory-address 0000000000000000000000000000000000000000 --calling-address 0000000000000000000000000000000000000000 --init-code-hash 0000000000000000000000000000000000000000000000000000000000000000 --gpu-device 0 --leading-zeroes 2 --total-zeroes 8 --backend metal
+
+        let factory_address = hex::decode("0000000000000000000000000000000000000000").unwrap();
+        let mut factory_address_bytes = [0u8; 20];
+        factory_address_bytes.copy_from_slice(&factory_address);
+
+        let calling_address = hex::decode("0000000000000000000000000000000000000000").unwrap();
+        let mut calling_address_bytes = [0u8; 20];
+        calling_address_bytes.copy_from_slice(&calling_address);
+
+        let init_code_hash =
+            hex::decode("0000000000000000000000000000000000000000000000000000000000000000")
+                .unwrap();
+        let mut init_code_hash_bytes = [0u8; 32];
+        init_code_hash_bytes.copy_from_slice(&init_code_hash);
+
         Config {
-            factory_address: [0x11; 20], // Dummy factory address
-            calling_address: [0x22; 20], // Dummy caller address
-            init_code_hash: [0x33; 32],  // Dummy init code hash
+            factory_address: factory_address_bytes,
+            calling_address: calling_address_bytes,
+            init_code_hash: init_code_hash_bytes,
             gpu_device: 0,               // First GPU device
-            leading_zeroes_threshold: 1, // Low threshold for testing
-            total_zeroes_threshold: 2,   // Low threshold for testing
+            leading_zeroes_threshold: 2, // From the command: --leading-zeroes 2
+            total_zeroes_threshold: 8,   // From the command: --total-zeroes 8
             backend: GpuBackend::OpenCL, // Will be overridden in tests
             optimize: false,             // Not running in optimization mode
             two_phase: false,            // Not using two-phase optimization
             benchmark_duration: 1,       // Default benchmark duration
         }
+    }
+
+    // Test that our Keccak-256 implementation correctly produces the expected addresses
+    #[test]
+    fn test_keccak_address_generation() {
+        use tiny_keccak::{Hasher, Keccak};
+
+        // Define test cases: (full_salt_hex, expected_address)
+        let test_cases = [
+            (
+                hex!("0000000000000000000000000000000000000000aabb706489ed0000c6120000"),
+                "0x0000CAB3F946452245b5B3777662B681bAE210B9",
+            ),
+            (
+                hex!("0000000000000000000000000000000000000000d2fb7aafd9eb0000c9120000"),
+                "0x0000fDce9270824ee0a25007Ec482b0e66D3FA07",
+            ),
+            (
+                hex!("0000000000000000000000000000000000000000747809946ef00200cc120000"),
+                "0x000085be129413984a42598BE7F5CeB62B2d6AF5",
+            ),
+            (
+                hex!("0000000000000000000000000000000000000000a6c1db3b9bef0000cf120000"),
+                "0x000020ca4E17223D758EFFa317f0533Ef0dF89E9",
+            ),
+            (
+                hex!("0000000000000000000000000000000000000000628c0a0554b50000d2120000"),
+                "0x0000DaC509D1f6c7ee814D3f40829Ca1f377D386",
+            ),
+        ];
+
+        println!("Running {} hardcoded test cases", test_cases.len());
+
+        for (i, (full_salt, expected_address)) in test_cases.iter().enumerate() {
+            println!(
+                "Test case {}/{}: Testing with full salt: 0x{}",
+                i + 1,
+                test_cases.len(),
+                hex::encode(full_salt)
+            );
+
+            // Prepare the message with the CREATE2 format
+            let mut buffer = [0u8; 85]; // Keccak sponge size
+
+            // Control character
+            buffer[0] = 0xff;
+
+            // Factory and caller addresses (all zeros in this case)
+            // Already initialized to zeros, so no need to set
+
+            // Copy the salt
+            buffer[21..53].copy_from_slice(&full_salt[..]);
+
+            // Init code hash (all zeros in this case)
+            // Already initialized to zeros, so no need to set
+
+            // Padding (as in the kernels)
+
+            // Compute hash
+            let mut keccak = Keccak::v256();
+            let mut hash = [0u8; 32];
+            keccak.update(&buffer); // Only include up to the padding
+            keccak.finalize(&mut hash);
+
+            // Extract address from hash
+            let address = extract_address_from_hash(&hash);
+
+            // Verify it matches the expected address
+            assert_eq!(
+                address.to_lowercase(),
+                expected_address.to_lowercase(),
+                "Generated address doesn't match expected address!\nExpected: {}\nActual: {}",
+                expected_address,
+                address
+            );
+
+            println!(
+                "Test case {}/{}: Success! Generated address: {}",
+                i + 1,
+                test_cases.len(),
+                address
+            );
+        }
+
+        println!(
+            "All {} hardcoded test cases passed successfully!",
+            test_cases.len()
+        );
     }
 
     // Test that OpenCL and Metal implementations produce the same results
@@ -436,5 +549,95 @@ mod tests {
             }
         }
         false
+    }
+
+    // Test salt-address pairs from the Metal backend output
+    #[test]
+    fn test_metal_backend_salt_address_pairs() {
+        use tiny_keccak::{Hasher, Keccak};
+
+        // Define test cases from the Metal backend output: (full_salt_hex, expected_address)
+        let test_cases = [
+            (
+                hex!("000000000000000000000000000000000000000097be173ef8cb7d0097777eaa"),
+                "0x0000f8e01e7f5D28b0E2742f3E0Ef7C5421D8401",
+            ),
+            (
+                hex!("0000000000000000000000000000000000000000f1d395a63ef67f002afa6908"),
+                "0x000061877B9B0d00E69Ec0B08F4Fba18b9f01d28",
+            ),
+            (
+                hex!("000000000000000000000000000000000000000043ef775d8e3976006ca69a66"),
+                "0x0000071290B9C202bD27E317e6997B1218Feda39",
+            ),
+            (
+                hex!("00000000000000000000000000000000000000001b96757d38507f00b53ede9f"),
+                "0x000089b14c370CB3029411Ff5Cd2bC53148f8694",
+            ),
+            (
+                hex!("0000000000000000000000000000000000000000c336f2a08a6e7f00b79f76be"),
+                "0x0000F004bbEb1F90F7471c47A125113e3e72f688",
+            ),
+        ];
+
+        println!("Running {} Metal backend test cases", test_cases.len());
+
+        for (i, (full_salt, expected_address)) in test_cases.iter().enumerate() {
+            println!(
+                "Metal test case {}/{}: Testing with full salt: 0x{}",
+                i + 1,
+                test_cases.len(),
+                hex::encode(full_salt)
+            );
+
+            // Prepare the message with the CREATE2 format
+            let mut buffer = [0u8; 85]; // Keccak sponge size
+
+            // Control character
+            buffer[0] = 0xff;
+
+            // Factory and caller addresses (all zeros in this case)
+            // Already initialized to zeros, so no need to set
+
+            // Copy the full salt (excluding the first 20 bytes which are the calling address)
+            // The format appears to be: 20 bytes calling address + 12 bytes salt
+            buffer[21..53].copy_from_slice(&full_salt[..]);
+
+            // Init code hash (all zeros in this case)
+            // Already initialized to zeros, so no need to set
+
+            // Compute hash
+            let mut keccak = Keccak::v256();
+            let mut hash = [0u8; 32];
+            keccak.update(&buffer); // Only include up to the padding
+            keccak.finalize(&mut hash);
+
+            // Extract address from hash
+            let address = extract_address_from_hash(&hash);
+
+            // Print both addresses for comparison
+            println!("Expected: {}\nActual: {}", expected_address, address);
+
+            // Verify it matches the expected address
+            assert_eq!(
+                address.to_lowercase(),
+                expected_address.to_lowercase(),
+                "Generated address doesn't match expected address!\nExpected: {}\nActual: {}",
+                expected_address,
+                address
+            );
+
+            println!(
+                "Metal test case {}/{}: Success! Generated address: {}",
+                i + 1,
+                test_cases.len(),
+                address
+            );
+        }
+
+        println!(
+            "All {} Metal backend test cases passed successfully!",
+            test_cases.len()
+        );
     }
 }

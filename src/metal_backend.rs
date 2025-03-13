@@ -2,7 +2,7 @@ use crate::{Config, Reward, CONTROL_CHARACTER};
 use alloy_primitives::{hex, Address, FixedBytes};
 use console::Term;
 use metal::*;
-use rand::{thread_rng, Rng, RngCore};
+use rand::thread_rng;
 use separator::Separatable;
 use std::collections::HashSet;
 use std::error::Error;
@@ -179,7 +179,7 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     let global_nonce_counter = Arc::new(Mutex::new(0u32));
 
     // create a random number generator
-    let mut rng = thread_rng();
+    let rng = thread_rng();
 
     // determine the start time
     let start_time: f64 = SystemTime::now()
@@ -330,287 +330,253 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     });
 
     // Number of parallel command buffers to use
-    let num_parallel_buffers = 3;
 
     // begin searching for addresses
     loop {
-        // Create multiple command buffers for pipelining
-        let mut command_buffers = Vec::with_capacity(num_parallel_buffers);
+        // Generate a completely unique random salt for each command buffer
+        // This ensures different command buffers work on completely different salt spaces
+        let salt = FixedBytes::<4>::random();
 
-        for buffer_idx in 0..num_parallel_buffers {
-            // Generate a completely unique random salt for each command buffer
-            // This ensures different command buffers work on completely different salt spaces
-            // Include the buffer index in the salt to ensure uniqueness
-            let mut salt_bytes = [0u8; 4];
-            rng.fill_bytes(&mut salt_bytes);
-
-            // Incorporate buffer index into the salt to ensure uniqueness across parallel buffers
-            // Use the lower bits for the buffer index (up to 64 parallel buffers = 6 bits)
-            // and the upper bits for random entropy
-            salt_bytes[0] = buffer_idx as u8;
-
-            let salt = FixedBytes::<4>::from_slice(&salt_bytes);
-
-            // Update message buffer contents with the unique salt
-            if let Some(staging) = &staging_message_buffer {
-                let message_ptr = staging.contents() as *mut u8;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(salt.as_ptr(), message_ptr, 4);
-                }
-            } else {
-                let message_ptr = message_buffer.contents() as *mut u8;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(salt.as_ptr(), message_ptr, 4);
-                }
-            }
-
-            // Get a unique base nonce for this command buffer
-            // We use a counter combined with random values to ensure uniqueness
-            // and complement the hierarchical thread ID approach in the kernel
-            let base_nonce = {
-                let mut counter = global_nonce_counter.lock().unwrap();
-
-                // Increment the counter to ensure uniqueness
-                *counter = counter.wrapping_add(1);
-
-                // Use the counter in the upper bits that aren't used by the thread ID
-                // This ensures no overlap between different command buffers
-                // The thread ID uses 16 bits for group ID and 16 bits for local ID
-                // So we'll use the upper 16 bits for the counter and lower 16 for random entropy
-                (*counter << 16) | (rng.gen::<u32>() & 0xFFFF)
-            };
-
-            // Update nonce buffer with the base nonce
-            // The kernel will combine this with the hierarchical thread ID to form a unique 64-bit nonce
-            if let Some(staging) = &staging_nonce_buffer {
-                let nonce_ptr = staging.contents() as *mut u32;
-                unsafe {
-                    *nonce_ptr = base_nonce;
-                }
-            } else {
-                let nonce_ptr = nonce_buffer.contents() as *mut u32;
-                unsafe {
-                    *nonce_ptr = base_nonce;
-                }
-            }
-
-            // Reset solutions counter
-            let counter_ptr = counter_buffer.contents() as *mut u32;
+        // Update message buffer contents with the unique salt
+        if let Some(staging) = &staging_message_buffer {
+            let message_ptr = staging.contents() as *mut u8;
             unsafe {
-                *counter_ptr = 0;
+                std::ptr::copy_nonoverlapping(salt.as_ptr(), message_ptr, 4);
             }
-
-            // Create command buffer and encoder
-            let command_buffer = command_queue.new_command_buffer();
-            let mut compute_encoder =
-                SafeEncoder::new(command_buffer.new_compute_command_encoder());
-
-            // Set compute pipeline
-            compute_encoder
-                .encoder
-                .set_compute_pipeline_state(&pipeline_state);
-
-            // Copy from staging buffers if needed
-            if let Some(staging) = &staging_message_buffer {
-                let mut blit_encoder =
-                    SafeBlitEncoder::new(command_buffer.new_blit_command_encoder());
-                blit_encoder
-                    .encoder
-                    .copy_from_buffer(staging, 0, &message_buffer, 0, 4);
-                blit_encoder.end_encoding();
+        } else {
+            let message_ptr = message_buffer.contents() as *mut u8;
+            unsafe {
+                std::ptr::copy_nonoverlapping(salt.as_ptr(), message_ptr, 4);
             }
-
-            if let Some(staging) = &staging_nonce_buffer {
-                let mut blit_encoder =
-                    SafeBlitEncoder::new(command_buffer.new_blit_command_encoder());
-                blit_encoder
-                    .encoder
-                    .copy_from_buffer(staging, 0, &nonce_buffer, 0, 4);
-                blit_encoder.end_encoding();
-            }
-
-            // Set buffers
-            compute_encoder
-                .encoder
-                .set_buffer(0, Some(&message_buffer), 0);
-            compute_encoder
-                .encoder
-                .set_buffer(1, Some(&nonce_buffer), 0);
-            compute_encoder
-                .encoder
-                .set_buffer(2, Some(&solutions_buffer), 0);
-            compute_encoder
-                .encoder
-                .set_buffer(3, Some(&counter_buffer), 0);
-
-            // Dispatch threads
-            compute_encoder
-                .encoder
-                .dispatch_threads(grid_size, threadgroup_size);
-
-            // End encoding - will be called automatically by Drop, but we do it explicitly for clarity
-            compute_encoder.end_encoding();
-
-            // Instead of using a completion handler, we'll just wait for each command buffer
-            // and process results immediately
-            command_buffer.commit();
-            command_buffers.push((command_buffer, salt)); // Store the salt with the command buffer
         }
 
+        // Get a unique base nonce for this command buffer
+        let base_nonce = {
+            let mut counter = global_nonce_counter.lock().unwrap();
+            *counter += 1;
+            *counter
+        };
+
+        // Update nonce buffer with the sequential base nonce
+        if let Some(staging) = &staging_nonce_buffer {
+            let nonce_ptr = staging.contents() as *mut u32;
+            unsafe {
+                *nonce_ptr = base_nonce;
+            }
+        } else {
+            let nonce_ptr = nonce_buffer.contents() as *mut u32;
+            unsafe {
+                *nonce_ptr = base_nonce;
+            }
+        }
+
+        // Reset solutions counter
+        let counter_ptr = counter_buffer.contents() as *mut u32;
+        unsafe {
+            *counter_ptr = 0;
+        }
+
+        // Create command buffer and encoder
+        let command_buffer = command_queue.new_command_buffer();
+        let mut compute_encoder = SafeEncoder::new(command_buffer.new_compute_command_encoder());
+
+        // Set compute pipeline
+        compute_encoder
+            .encoder
+            .set_compute_pipeline_state(&pipeline_state);
+
+        // Copy from staging buffers if needed
+        if let Some(staging) = &staging_message_buffer {
+            let mut blit_encoder = SafeBlitEncoder::new(command_buffer.new_blit_command_encoder());
+            blit_encoder
+                .encoder
+                .copy_from_buffer(staging, 0, &message_buffer, 0, 4);
+            blit_encoder.end_encoding();
+        }
+
+        if let Some(staging) = &staging_nonce_buffer {
+            let mut blit_encoder = SafeBlitEncoder::new(command_buffer.new_blit_command_encoder());
+            blit_encoder
+                .encoder
+                .copy_from_buffer(staging, 0, &nonce_buffer, 0, 4);
+            blit_encoder.end_encoding();
+        }
+
+        // Set buffers
+        compute_encoder
+            .encoder
+            .set_buffer(0, Some(&message_buffer), 0);
+        compute_encoder
+            .encoder
+            .set_buffer(1, Some(&nonce_buffer), 0);
+        compute_encoder
+            .encoder
+            .set_buffer(2, Some(&solutions_buffer), 0);
+        compute_encoder
+            .encoder
+            .set_buffer(3, Some(&counter_buffer), 0);
+
+        // Dispatch threads
+        compute_encoder
+            .encoder
+            .dispatch_threads(grid_size, threadgroup_size);
+
+        // End encoding - will be called automatically by Drop, but we do it explicitly for clarity
+        compute_encoder.end_encoding();
+
+        // Instead of using a completion handler, we'll just wait for each command buffer
+        // and process results immediately
+        command_buffer.commit();
+
         // Wait for all command buffers to complete and process results
-        for (buffer, salt) in command_buffers {
-            buffer.wait_until_completed();
+        command_buffer.wait_until_completed();
 
-            // Increment the cumulative nonce
-            {
-                let mut cumulative = cumulative_nonce.lock().unwrap();
-                *cumulative += 1;
+        // Increment the cumulative nonce
+        {
+            let mut cumulative = cumulative_nonce.lock().unwrap();
+            *cumulative += 1;
+        }
+
+        // Update rate
+        {
+            let mut rate_val = rate.lock().unwrap();
+            let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+            let current_time = now.as_secs_f64();
+            if current_time - start_time > 0.0 {
+                *rate_val = 1.0 / (current_time - start_time);
             }
+        }
 
-            // Update rate
-            {
-                let mut rate_val = rate.lock().unwrap();
-                let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-                let current_time = now.as_secs_f64();
-                if current_time - start_time > 0.0 {
-                    *rate_val = 1.0 / (current_time - start_time);
+        // Check for solutions
+        let counter_ptr = counter_buffer.contents() as *const u32;
+        let num_solutions = unsafe { *counter_ptr };
+
+        if num_solutions > 0 {
+            // Process all solutions
+            let solutions_ptr = solutions_buffer.contents() as *const u64;
+
+            // Track salts we've already processed in this batch
+            let mut processed_salts = HashSet::new();
+            let salt_hex = hex::encode(&salt[..]);
+
+            for i in 0..std::cmp::min(num_solutions as usize, max_solutions) {
+                let solution = unsafe { *solutions_ptr.add(i) };
+                if solution == 0 {
+                    continue;
                 }
-            }
 
-            // Check for solutions
-            let counter_ptr = counter_buffer.contents() as *const u32;
-            let num_solutions = unsafe { *counter_ptr };
+                let solution_bytes = solution.to_le_bytes();
 
-            if num_solutions > 0 {
-                // Process all solutions
-                let solutions_ptr = solutions_buffer.contents() as *const u64;
+                // Create a unique identifier for this solution
+                let solution_id =
+                    format!("{}{}", hex::encode(&salt[..]), hex::encode(solution_bytes));
 
-                // Track salts we've already processed in this batch
-                let mut processed_salts = HashSet::new();
-                let salt_hex = hex::encode(&salt[..]);
+                // Check if we've already processed this solution
+                let mut processed_guard = processed_solutions.lock().unwrap();
+                if processed_guard.contains(&solution_id) {
+                    continue;
+                }
 
-                for i in 0..std::cmp::min(num_solutions as usize, max_solutions) {
-                    let solution = unsafe { *solutions_ptr.add(i) };
-                    if solution == 0 {
-                        continue;
-                    }
+                // Check if we've already processed a solution with this salt in this batch
+                if processed_salts.contains(&salt_hex) {
+                    continue;
+                }
 
-                    // Convert the 64-bit solution to bytes (8 bytes total)
-                    // This contains the full nonce with all bytes properly utilized
-                    let solution_bytes = solution.to_le_bytes();
+                // Add salt to processed salts for this batch
+                processed_salts.insert(salt_hex.clone());
 
-                    // Create a unique identifier for this solution
-                    let solution_id =
-                        format!("{}{}", hex::encode(&salt[..]), hex::encode(solution_bytes));
+                // Add to processed solutions
+                processed_guard.insert(solution_id);
+                drop(processed_guard); // Release the lock early
 
-                    // Check if we've already processed this solution
-                    let mut processed_guard = processed_solutions.lock().unwrap();
-                    if processed_guard.contains(&solution_id) {
-                        continue;
-                    }
+                let mut solution_message = [0; 85];
+                solution_message[0] = CONTROL_CHARACTER;
+                solution_message[1..21].copy_from_slice(&config.factory_address);
+                solution_message[21..41].copy_from_slice(&config.calling_address);
+                solution_message[41..45].copy_from_slice(&salt[..]);
+                solution_message[45..53].copy_from_slice(&solution_bytes);
+                solution_message[53..].copy_from_slice(&config.init_code_hash);
 
-                    // Check if we've already processed a solution with this salt in this batch
-                    if processed_salts.contains(&salt_hex) {
-                        continue;
-                    }
+                // create new hash object
+                let mut hash = Keccak::v256();
 
-                    // Add salt to processed salts for this batch
-                    processed_salts.insert(salt_hex.clone());
+                // update with header
+                hash.update(&solution_message);
 
-                    // Add to processed solutions
-                    processed_guard.insert(solution_id);
-                    drop(processed_guard); // Release the lock early
+                // hash the payload and get the result
+                let mut res: [u8; 32] = [0; 32];
+                hash.finalize(&mut res);
 
-                    let mut solution_message = [0; 85];
-                    solution_message[0] = CONTROL_CHARACTER;
-                    solution_message[1..21].copy_from_slice(&config.factory_address);
-                    solution_message[21..41].copy_from_slice(&config.calling_address);
-                    solution_message[41..45].copy_from_slice(&salt[..]);
-                    solution_message[45..53].copy_from_slice(&solution_bytes);
-                    solution_message[53..].copy_from_slice(&config.init_code_hash);
+                // get the address that results from the hash
+                let address = <&Address>::try_from(&res[12..]).unwrap();
 
-                    // create new hash object
-                    let mut hash = Keccak::v256();
+                // Count zero bytes in the address (20 bytes)
+                // This needs to match the Metal kernel's logic
+                let mut total_zeroes = 0;
+                let mut leading_zeroes = 0;
+                let mut still_leading = true;
 
-                    // update with header
-                    hash.update(&solution_message);
-
-                    // hash the payload and get the result
-                    let mut res: [u8; 32] = [0; 32];
-                    hash.finalize(&mut res);
-
-                    // get the address that results from the hash
-                    let address = <&Address>::try_from(&res[12..]).unwrap();
-
-                    // Count zero bytes in the address (20 bytes)
-                    // This needs to match the Metal kernel's logic
-                    let mut total_zeroes = 0;
-                    let mut leading_zeroes = 0;
-                    let mut still_leading = true;
-
-                    for &byte in address.iter() {
-                        if byte == 0 {
-                            total_zeroes += 1;
-                            if still_leading {
-                                leading_zeroes += 1;
-                            }
-                        } else {
-                            still_leading = false;
+                for &byte in address.iter() {
+                    if byte == 0 {
+                        total_zeroes += 1;
+                        if still_leading {
+                            leading_zeroes += 1;
                         }
+                    } else {
+                        still_leading = false;
+                    }
+                }
+
+                // Verify this is actually a solution according to our criteria
+                let meets_leading_criteria =
+                    leading_zeroes >= config.leading_zeroes_threshold as usize;
+                let meets_total_criteria = total_zeroes >= config.total_zeroes_threshold as usize;
+
+                // Only process if it meets either criteria
+                if meets_leading_criteria || meets_total_criteria {
+                    // Use the correct leading count for key and display
+                    let key = leading_zeroes * 20 + total_zeroes;
+                    let reward = rewards.get(&key).unwrap_or("0");
+                    let output = format!(
+                        "0x{}{}{} => {} => {}",
+                        hex::encode(config.calling_address),
+                        hex::encode(salt),
+                        hex::encode(solution_bytes),
+                        address,
+                        reward,
+                    );
+
+                    let show = format!("{output} ({leading_zeroes} / {total_zeroes})");
+
+                    // Update found count and list
+                    {
+                        let mut found_list_guard = found_list.lock().unwrap();
+                        found_list_guard.push(show.to_string());
                     }
 
-                    // Verify this is actually a solution according to our criteria
-                    let meets_leading_criteria =
-                        leading_zeroes >= config.leading_zeroes_threshold as usize;
-                    let meets_total_criteria =
-                        total_zeroes >= config.total_zeroes_threshold as usize;
-
-                    // Only process if it meets either criteria
-                    if meets_leading_criteria || meets_total_criteria {
-                        // Use the correct leading count for key and display
-                        let key = leading_zeroes * 20 + total_zeroes;
-                        let reward = rewards.get(&key).unwrap_or("0");
-                        let output = format!(
-                            "0x{}{}{} => {} => {}",
-                            hex::encode(config.calling_address),
-                            hex::encode(salt),
-                            hex::encode(solution_bytes),
-                            address,
-                            reward,
-                        );
-
-                        let show = format!("{output} ({leading_zeroes} / {total_zeroes})");
-
-                        // Update found count and list
-                        {
-                            let mut found_list_guard = found_list.lock().unwrap();
-                            found_list_guard.push(show.to_string());
-                        }
-
-                        // Write to file using a different approach
-                        {
-                            // Spawn a thread to handle file writing to avoid blocking the main thread
-                            let output_to_write = output.clone();
-                            thread::spawn(move || {
-                                // Use OpenOptions to open the file in append mode
-                                if let Ok(mut file) = std::fs::OpenOptions::new()
-                                    .append(true)
-                                    .open("efficient_addresses.txt")
-                                {
-                                    // Write to the file
-                                    if let Err(e) = writeln!(file, "{}", output_to_write) {
-                                        eprintln!("Error writing to file: {}", e);
-                                    }
-                                } else {
-                                    eprintln!("Error opening file for writing");
+                    // Write to file using a different approach
+                    {
+                        // Spawn a thread to handle file writing to avoid blocking the main thread
+                        let output_to_write = output.clone();
+                        thread::spawn(move || {
+                            // Use OpenOptions to open the file in append mode
+                            if let Ok(mut file) = std::fs::OpenOptions::new()
+                                .append(true)
+                                .open("efficient_addresses.txt")
+                            {
+                                // Write to the file
+                                if let Err(e) = writeln!(file, "{}", output_to_write) {
+                                    eprintln!("Error writing to file: {}", e);
                                 }
-                            });
-                        }
-
-                        // Increment found counter
-                        let mut found_guard = found.lock().unwrap();
-                        *found_guard += 1;
+                            } else {
+                                eprintln!("Error opening file for writing");
+                            }
+                        });
                     }
+
+                    // Increment found counter
+                    let mut found_guard = found.lock().unwrap();
+                    *found_guard += 1;
                 }
             }
         }

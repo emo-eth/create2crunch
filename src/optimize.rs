@@ -3,9 +3,7 @@ use alloy_primitives::FixedBytes;
 use metal::*;
 use rand::{thread_rng, Rng};
 use std::error::Error;
-use std::fmt::Write as _;
 use std::fs::File;
-use std::io::Write as IoWrite;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -70,7 +68,6 @@ impl<'a> Drop for SafeBlitEncoder<'a> {
 pub struct BenchmarkResult {
     pub work_size: u64,
     pub threadgroup_size: u64,
-    pub parallel_buffers: usize,
     pub hash_rate: f64,
     pub solutions_found: u64,
     pub duration_seconds: f64,
@@ -81,12 +78,11 @@ pub fn benchmark_configuration(
     config: &Config,
     work_size: u64,
     threadgroup_size: u64,
-    parallel_buffers: usize,
     duration_seconds: u64,
 ) -> Result<BenchmarkResult, Box<dyn Error>> {
     println!(
-        "Benchmarking: work_size={}, threadgroup_size={}, parallel_buffers={}",
-        work_size, threadgroup_size, parallel_buffers
+        "Benchmarking: work_size={}, threadgroup_size={}",
+        work_size, threadgroup_size
     );
 
     // Get the Metal device
@@ -112,8 +108,7 @@ pub fn benchmark_configuration(
     let command_queue = device.new_command_queue_with_max_command_buffer_count(64);
 
     // Compile the Metal kernel
-    // let metal_src = crate::metal::kernel::mk_metal_src(config);
-    let metal_src = crate::metal_backend2::mk_metal_src(config);
+    let metal_src = crate::metal_backend::mk_metal_src(config);
     let options = CompileOptions::new();
 
     let library = device
@@ -229,116 +224,107 @@ pub fn benchmark_configuration(
         let mut nonce: [u32; 1] = rng.gen();
 
         // Create multiple command buffers for pipelining
-        let mut command_buffers = Vec::with_capacity(parallel_buffers);
 
-        for _ in 0..parallel_buffers {
-            // Update nonce buffer contents
-            if let Some(staging) = &staging_nonce_buffer {
-                let nonce_ptr = staging.contents() as *mut u32;
-                unsafe {
-                    *nonce_ptr = nonce[0];
-                }
-            } else {
-                let nonce_ptr = nonce_buffer.contents() as *mut u32;
-                unsafe {
-                    *nonce_ptr = nonce[0];
-                }
-            }
-
-            // Reset solutions counter
-            let counter_ptr = counter_buffer.contents() as *mut u32;
+        // Update nonce buffer contents
+        if let Some(staging) = &staging_nonce_buffer {
+            let nonce_ptr = staging.contents() as *mut u32;
             unsafe {
-                *counter_ptr = 0;
+                *nonce_ptr = nonce[0];
             }
-
-            // Create command buffer
-            let command_buffer = command_queue.new_command_buffer();
-
-            // Create compute command encoder with safety wrapper
-            let mut compute_encoder =
-                SafeEncoder::new(command_buffer.new_compute_command_encoder());
-
-            // Set compute pipeline
-            compute_encoder
-                .encoder
-                .set_compute_pipeline_state(&pipeline_state);
-
-            // Copy from staging buffers if needed
-            if let Some(staging) = &staging_message_buffer {
-                let mut blit_encoder =
-                    SafeBlitEncoder::new(command_buffer.new_blit_command_encoder());
-                blit_encoder
-                    .encoder
-                    .copy_from_buffer(staging, 0, &message_buffer, 0, 4);
-                blit_encoder.end_encoding();
+        } else {
+            let nonce_ptr = nonce_buffer.contents() as *mut u32;
+            unsafe {
+                *nonce_ptr = nonce[0];
             }
-
-            if let Some(staging) = &staging_nonce_buffer {
-                let mut blit_encoder =
-                    SafeBlitEncoder::new(command_buffer.new_blit_command_encoder());
-                blit_encoder
-                    .encoder
-                    .copy_from_buffer(staging, 0, &nonce_buffer, 0, 4);
-                blit_encoder.end_encoding();
-            }
-
-            // Set buffers
-            compute_encoder
-                .encoder
-                .set_buffer(0, Some(&message_buffer), 0);
-            compute_encoder
-                .encoder
-                .set_buffer(1, Some(&nonce_buffer), 0);
-            compute_encoder
-                .encoder
-                .set_buffer(2, Some(&solutions_buffer), 0);
-            compute_encoder
-                .encoder
-                .set_buffer(3, Some(&counter_buffer), 0);
-
-            // Dispatch threads
-            compute_encoder
-                .encoder
-                .dispatch_threads(grid_size, threadgroup_size);
-
-            // End encoding - will be called automatically by Drop, but we do it explicitly for clarity
-            compute_encoder.end_encoding();
-
-            // Commit command buffer
-            command_buffer.commit();
-            command_buffers.push(command_buffer);
-
-            // Increment nonce for next buffer
-            nonce[0] = nonce[0].wrapping_add(work_size as u32);
         }
 
+        // Reset solutions counter
+        let counter_ptr = counter_buffer.contents() as *mut u32;
+        unsafe {
+            *counter_ptr = 0;
+        }
+
+        // Create command buffer
+        let command_buffer = command_queue.new_command_buffer();
+
+        // Create compute command encoder with safety wrapper
+        let mut compute_encoder = SafeEncoder::new(command_buffer.new_compute_command_encoder());
+
+        // Set compute pipeline
+        compute_encoder
+            .encoder
+            .set_compute_pipeline_state(&pipeline_state);
+
+        // Copy from staging buffers if needed
+        if let Some(staging) = &staging_message_buffer {
+            let mut blit_encoder = SafeBlitEncoder::new(command_buffer.new_blit_command_encoder());
+            blit_encoder
+                .encoder
+                .copy_from_buffer(staging, 0, &message_buffer, 0, 4);
+            blit_encoder.end_encoding();
+        }
+
+        if let Some(staging) = &staging_nonce_buffer {
+            let mut blit_encoder = SafeBlitEncoder::new(command_buffer.new_blit_command_encoder());
+            blit_encoder
+                .encoder
+                .copy_from_buffer(staging, 0, &nonce_buffer, 0, 4);
+            blit_encoder.end_encoding();
+        }
+
+        // Set buffers
+        compute_encoder
+            .encoder
+            .set_buffer(0, Some(&message_buffer), 0);
+        compute_encoder
+            .encoder
+            .set_buffer(1, Some(&nonce_buffer), 0);
+        compute_encoder
+            .encoder
+            .set_buffer(2, Some(&solutions_buffer), 0);
+        compute_encoder
+            .encoder
+            .set_buffer(3, Some(&counter_buffer), 0);
+
+        // Dispatch threads
+        compute_encoder
+            .encoder
+            .dispatch_threads(grid_size, threadgroup_size);
+
+        // End encoding - will be called automatically by Drop, but we do it explicitly for clarity
+        compute_encoder.end_encoding();
+
+        // Commit command buffer
+        command_buffer.commit();
+
+        // Increment nonce for next buffer
+        nonce[0] = nonce[0].wrapping_add(work_size as u32);
+
         // Wait for all command buffers to complete and process results
-        for buffer in command_buffers {
-            buffer.wait_until_completed();
+        command_buffer.wait_until_completed();
 
-            // Increment the cumulative nonce
-            {
-                let mut cumulative = cumulative_nonce.lock().unwrap();
-                *cumulative += 1;
-            }
+        // Increment the cumulative nonce
+        {
+            let mut cumulative = cumulative_nonce.lock().unwrap();
+            *cumulative += 1;
+        }
 
-            // Check for solutions
-            let counter_ptr = counter_buffer.contents() as *const u32;
-            let num_solutions = unsafe { *counter_ptr };
+        // Check for solutions
+        let counter_ptr = counter_buffer.contents() as *const u32;
+        let num_solutions = unsafe { *counter_ptr };
 
-            if num_solutions > 0 {
-                // Process all solutions
-                let solutions_ptr = solutions_buffer.contents() as *const u64;
-                for i in 0..std::cmp::min(num_solutions as usize, max_solutions) {
-                    let solution = unsafe { *solutions_ptr.add(i) };
-                    if solution == 0 {
-                        continue;
-                    }
-
-                    // Increment solutions found counter
-                    let mut found_guard = solutions_found.lock().unwrap();
-                    *found_guard += 1;
+        if num_solutions > 0 {
+            // Process all solutions
+            let solutions_ptr = solutions_buffer.contents() as *const u64;
+            for i in 0..std::cmp::min(num_solutions as usize, max_solutions) {
+                let solution = unsafe { *solutions_ptr.add(i) };
+                if solution == 0 {
+                    continue;
                 }
+
+                // Increment solutions found counter
+                let mut found_guard = solutions_found.lock().unwrap();
+                *found_guard += 1;
             }
         }
     }
@@ -356,7 +342,6 @@ pub fn benchmark_configuration(
     let result = BenchmarkResult {
         work_size,
         threadgroup_size: threadgroup_size.width,
-        parallel_buffers,
         hash_rate,
         solutions_found: *solutions_found.lock().unwrap(),
         duration_seconds: actual_duration,
@@ -388,7 +373,6 @@ pub fn grid_search(config: &Config, duration_seconds: u64) -> Result<(), Box<dyn
         default_work_size * 4,
     ];
     let threadgroup_sizes = [32, 64, 128, 256, 512, 1024];
-    let parallel_buffers = [1, 2, 3, 4, 6, 8];
 
     // Track best configuration
     let mut best_result: Option<BenchmarkResult> = None;
@@ -397,34 +381,26 @@ pub fn grid_search(config: &Config, duration_seconds: u64) -> Result<(), Box<dyn
     // Grid search
     for &work_size in &work_sizes {
         for &threadgroup_size in &threadgroup_sizes {
-            for &buffer_count in &parallel_buffers {
-                match benchmark_configuration(
-                    config,
-                    work_size,
-                    threadgroup_size,
-                    buffer_count,
-                    duration_seconds,
-                ) {
-                    Ok(result) => {
-                        // Update best if improved
-                        if best_result
-                            .as_ref()
-                            .is_none_or(|best| result.hash_rate > best.hash_rate)
-                        {
-                            println!(
-                                "New best: {:.2} MH/s with work_size={}, threadgroup={}, buffers={}",
-                                result.hash_rate, work_size, threadgroup_size, buffer_count
-                            );
-                            best_result = Some(result.clone());
-                        }
-                        results.push(result);
-                    }
-                    Err(e) => {
+            match benchmark_configuration(config, work_size, threadgroup_size, duration_seconds) {
+                Ok(result) => {
+                    // Update best if improved
+                    if best_result
+                        .as_ref()
+                        .map_or(true, |best| result.hash_rate > best.hash_rate)
+                    {
                         println!(
-                            "Error benchmarking configuration (work_size={}, threadgroup={}, buffers={}): {}",
-                            work_size, threadgroup_size, buffer_count, e
+                            "New best: {:.2} MH/s with work_size={}, threadgroup={}",
+                            result.hash_rate, work_size, threadgroup_size
                         );
+                        best_result = Some(result.clone());
                     }
+                    results.push(result);
+                }
+                Err(e) => {
+                    println!(
+                        "Error benchmarking configuration (work_size={}, threadgroup={} ): {}",
+                        work_size, threadgroup_size, e
+                    );
                 }
             }
         }
@@ -442,11 +418,10 @@ pub fn grid_search(config: &Config, duration_seconds: u64) -> Result<(), Box<dyn
 
     for (i, result) in results.iter().take(10).enumerate() {
         println!(
-            "| {:4} | {:9} | {:10} | {:7} | {:16.2} |",
+            "| {:4} | {:9} | {:10} | {:16.2} |",
             i + 1,
             result.work_size,
             result.threadgroup_size,
-            result.parallel_buffers,
             result.hash_rate
         );
     }
@@ -455,7 +430,6 @@ pub fn grid_search(config: &Config, duration_seconds: u64) -> Result<(), Box<dyn
         println!("\nOptimal configuration:");
         println!("  WORK_SIZE = {}", best.work_size);
         println!("  Threadgroup Size = {}", best.threadgroup_size);
-        println!("  Parallel Command Buffers = {}", best.parallel_buffers);
         println!("  Performance: {:.2} MH/s", best.hash_rate);
 
         // Save results to a file
@@ -466,22 +440,17 @@ pub fn grid_search(config: &Config, duration_seconds: u64) -> Result<(), Box<dyn
         writeln!(file, "Optimal configuration:")?;
         writeln!(file, "  WORK_SIZE = {}", best.work_size)?;
         writeln!(file, "  Threadgroup Size = {}", best.threadgroup_size)?;
-        writeln!(
-            file,
-            "  Parallel Command Buffers = {}",
-            best.parallel_buffers
-        )?;
+
         writeln!(file, "  Performance: {:.2} MH/s", best.hash_rate)?;
 
         writeln!(file, "\nTop 10 Configurations:")?;
         for (i, result) in results.iter().take(10).enumerate() {
             writeln!(
                 file,
-                "{:2}. work_size={}, threadgroup={}, buffers={}: {:.2} MH/s",
+                "{:2}. work_size={}, threadgroup={},: {:.2} MH/s",
                 i + 1,
                 result.work_size,
                 result.threadgroup_size,
-                result.parallel_buffers,
                 result.hash_rate
             )?;
         }
@@ -498,11 +467,7 @@ pub fn grid_search(config: &Config, duration_seconds: u64) -> Result<(), Box<dyn
             "OPTIMAL_THREADGROUP_SIZE={}",
             best.threadgroup_size
         )?;
-        writeln!(
-            env_file,
-            "OPTIMAL_PARALLEL_BUFFERS={}",
-            best.parallel_buffers
-        )?;
+
         writeln!(env_file, "# Performance: {:.2} MH/s", best.hash_rate)?;
         println!("Optimal parameters saved to .env file");
     } else {
@@ -539,7 +504,6 @@ pub fn two_phase_optimization(config: &Config) -> Result<(), Box<dyn Error>> {
 
     let mut best_work_size = 0;
     let mut best_threadgroup_size = 0;
-    let mut best_parallel_buffers = 0;
     let mut best_hash_rate = 0.0;
 
     // Coarse grid search
@@ -550,7 +514,6 @@ pub fn two_phase_optimization(config: &Config) -> Result<(), Box<dyn Error>> {
                     config,
                     work_size,
                     threadgroup_size,
-                    buffer_count,
                     1, // shorter duration for phase 1
                 ) {
                     Ok(result) => {
@@ -558,7 +521,6 @@ pub fn two_phase_optimization(config: &Config) -> Result<(), Box<dyn Error>> {
                             best_hash_rate = result.hash_rate;
                             best_work_size = work_size;
                             best_threadgroup_size = threadgroup_size;
-                            best_parallel_buffers = buffer_count;
                         }
                     }
                     Err(e) => {
@@ -573,8 +535,8 @@ pub fn two_phase_optimization(config: &Config) -> Result<(), Box<dyn Error>> {
     }
 
     println!(
-        "\nPhase 1 best: {:.2} MH/s with work_size={}, threadgroup={}, buffers={}",
-        best_hash_rate, best_work_size, best_threadgroup_size, best_parallel_buffers
+        "\nPhase 1 best: {:.2} MH/s with work_size={}, threadgroup={}",
+        best_hash_rate, best_work_size, best_threadgroup_size
     );
 
     // Phase 2: Fine-tuned search around the best configuration
@@ -596,45 +558,36 @@ pub fn two_phase_optimization(config: &Config) -> Result<(), Box<dyn Error>> {
         std::cmp::min(1024, best_threadgroup_size * threadgroup_factor),
     ];
 
-    let fine_parallel_buffers = [
-        std::cmp::max(1, best_parallel_buffers - 1),
-        best_parallel_buffers,
-        std::cmp::min(8, best_parallel_buffers + 1),
-    ];
-
     let mut best_result: Option<BenchmarkResult> = None;
     let mut results = Vec::new();
 
     // Fine-tuned grid search
     for &work_size in &fine_work_sizes {
         for &threadgroup_size in &fine_threadgroup_sizes {
-            for &buffer_count in &fine_parallel_buffers {
-                match benchmark_configuration(
-                    config,
-                    work_size,
-                    threadgroup_size,
-                    buffer_count,
-                    config.benchmark_duration, // longer duration for phase 2
-                ) {
-                    Ok(result) => {
-                        if best_result
-                            .as_ref()
-                            .is_none_or(|best| result.hash_rate > best.hash_rate)
-                        {
-                            println!(
-                                "New best: {:.2} MH/s with work_size={}, threadgroup={}, buffers={}",
-                                result.hash_rate, work_size, threadgroup_size, buffer_count
-                            );
-                            best_result = Some(result.clone());
-                        }
-                        results.push(result);
-                    }
-                    Err(e) => {
+            match benchmark_configuration(
+                config,
+                work_size,
+                threadgroup_size,
+                config.benchmark_duration, // longer duration for phase 2
+            ) {
+                Ok(result) => {
+                    if best_result
+                        .as_ref()
+                        .map_or(true, |best| result.hash_rate > best.hash_rate)
+                    {
                         println!(
-                            "Error in phase 2 (work_size={}, threadgroup={}, buffers={}): {}",
-                            work_size, threadgroup_size, buffer_count, e
+                            "New best: {:.2} MH/s with work_size={}, threadgroup={}",
+                            result.hash_rate, work_size, threadgroup_size
                         );
+                        best_result = Some(result.clone());
                     }
+                    results.push(result);
+                }
+                Err(e) => {
+                    println!(
+                        "Error in phase 2 (work_size={}, threadgroup={}): {}",
+                        work_size, threadgroup_size, e
+                    );
                 }
             }
         }
@@ -649,11 +602,10 @@ pub fn two_phase_optimization(config: &Config) -> Result<(), Box<dyn Error>> {
 
     for (i, result) in results.iter().enumerate() {
         println!(
-            "{:2}. work_size={}, threadgroup={}, buffers={}: {:.2} MH/s",
+            "{:2}. work_size={}, threadgroup={}, {:.2} MH/s",
             i + 1,
             result.work_size,
             result.threadgroup_size,
-            result.parallel_buffers,
             result.hash_rate
         );
     }
@@ -662,7 +614,6 @@ pub fn two_phase_optimization(config: &Config) -> Result<(), Box<dyn Error>> {
         println!("\nOptimal configuration:");
         println!("  WORK_SIZE = {}", best.work_size);
         println!("  Threadgroup Size = {}", best.threadgroup_size);
-        println!("  Parallel Command Buffers = {}", best.parallel_buffers);
         println!("  Performance: {:.2} MH/s", best.hash_rate);
 
         // Save results to a file
@@ -673,11 +624,6 @@ pub fn two_phase_optimization(config: &Config) -> Result<(), Box<dyn Error>> {
         writeln!(file, "Optimal configuration:")?;
         writeln!(file, "  WORK_SIZE = {}", best.work_size)?;
         writeln!(file, "  Threadgroup Size = {}", best.threadgroup_size)?;
-        writeln!(
-            file,
-            "  Parallel Command Buffers = {}",
-            best.parallel_buffers
-        )?;
         writeln!(file, "  Performance: {:.2} MH/s", best.hash_rate)?;
 
         // Save optimal parameters to .env file
@@ -689,11 +635,7 @@ pub fn two_phase_optimization(config: &Config) -> Result<(), Box<dyn Error>> {
             "OPTIMAL_THREADGROUP_SIZE={}",
             best.threadgroup_size
         )?;
-        writeln!(
-            env_file,
-            "OPTIMAL_PARALLEL_BUFFERS={}",
-            best.parallel_buffers
-        )?;
+
         writeln!(env_file, "# Performance: {:.2} MH/s", best.hash_rate)?;
         println!("Optimal parameters saved to .env file");
     } else {

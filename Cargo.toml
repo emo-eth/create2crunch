@@ -11,6 +11,7 @@ alloy-primitives = { version = "0.5", features = ["rand"] }
 byteorder = "1.5"
 console = "0.15"
 fs4 = "0.7"
+hex-literal = "0.4"
 ocl = { version = "0.19", optional = true }
 metal = { version = "0.31", optional = true }
 rand = "0.8"
@@ -20,6 +21,7 @@ separator = "0.4.1"
 terminal_size = "0.3.0"
 tiny-keccak = "2.0"
 clap = { version = "4.3.24", features = ["derive"] }
+hex = "0.4.3"
 
 [[bin]]
 name = "list_metal_devices"

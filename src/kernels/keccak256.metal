@@ -236,8 +236,6 @@ kernel void hashMessage(
   device volatile uint64_t *solutions [[buffer(2)]],
   device atomic_uint *solution_count [[buffer(3)]],
   uint gid [[thread_position_in_grid]],
-  uint tid [[thread_index_in_threadgroup]],
-  uint threadgroup_id [[threadgroup_position_in_grid]],
   uint threads_per_group [[threads_per_threadgroup]]
 ) {
   // Use thread memory for better performance
@@ -303,15 +301,10 @@ kernel void hashMessage(
   sponge[42] = d_message[1];
   sponge[43] = d_message[2];
   sponge[44] = d_message[3];
-
-  // Optimize thread distribution using hierarchical IDs
-  // This ensures better utilization of the 32-bit space
-  uint group_id = threadgroup_id;
-  uint local_id = tid;
-  
+ 
   // Combine group ID and local ID for better bit distribution
   // Use upper bits for group ID and lower bits for local ID
-  nonce.uint32_t[0] = (group_id << 16) | (local_id & 0xFFFF);
+  nonce.uint32_t[0] = gid;
   nonce.uint32_t[1] = d_nonce[0];
 
   // populate the body of the message with the nonce (vectorized)
