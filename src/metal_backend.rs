@@ -105,7 +105,7 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     println!("Using work size: {}", work_size);
 
     // (create if necessary) and open a file where found salts will be written
-    let file = Arc::new(crate::output_file());
+    Arc::new(crate::output_file());
 
     // create object for computing rewards (relative rarity) for a given address
     let rewards = Arc::new(Reward::new());

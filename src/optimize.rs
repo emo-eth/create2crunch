@@ -113,7 +113,7 @@ pub fn benchmark_configuration(
 
     // Compile the Metal kernel
     // let metal_src = crate::metal::kernel::mk_metal_src(config);
-    let metal_src = crate::metal_backend::mk_metal_src(config);
+    let metal_src = crate::metal_backend2::mk_metal_src(config);
     let options = CompileOptions::new();
 
     let library = device

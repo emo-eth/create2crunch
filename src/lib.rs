@@ -22,14 +22,14 @@ use tiny_keccak::{Hasher, Keccak};
 mod reward;
 pub use reward::Reward;
 
-#[cfg(feature = "metal")]
+// #[cfg(feature = "metal")]
 // mod metal;
-#[cfg(feature = "metal")]
+// #[cfg(feature = "metal")]
 // pub use metal::metal_gpu;
 #[cfg(feature = "metal")]
-mod metal_backend;
+mod metal_backend2;
 #[cfg(feature = "metal")]
-pub use metal_backend::metal_gpu;
+pub use metal_backend2::metal_gpu;
 
 #[cfg(feature = "metal")]
 pub mod optimize;
