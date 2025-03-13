@@ -112,7 +112,8 @@ pub fn benchmark_configuration(
     let command_queue = device.new_command_queue_with_max_command_buffer_count(64);
 
     // Compile the Metal kernel
-    let metal_src = crate::metal::kernel::mk_metal_src(config);
+    // let metal_src = crate::metal::kernel::mk_metal_src(config);
+    let metal_src = crate::metal_backend::mk_metal_src(config);
     let options = CompileOptions::new();
 
     let library = device

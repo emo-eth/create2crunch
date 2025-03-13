@@ -57,8 +57,16 @@ impl SolutionProcessor {
         solution_message[1..21].copy_from_slice(&self.config.factory_address);
         solution_message[21..41].copy_from_slice(&self.config.calling_address);
         solution_message[41..45].copy_from_slice(salt);
-        solution_message[45..53].copy_from_slice(&solution_bytes);
+        solution_message[45..53].copy_from_slice(&solution_bytes); // Use solution bytes directly
         solution_message[53..].copy_from_slice(&self.config.init_code_hash);
+
+        // Print debug info about the message being hashed
+        println!(
+            "DEBUG: Processing solution with salt={} and nonce={}",
+            hex::encode(salt),
+            solution
+        );
+        println!("DEBUG: Message to hash: {}", hex::encode(&solution_message));
 
         // create new hash object
         let mut hash = Keccak::v256();
@@ -69,6 +77,9 @@ impl SolutionProcessor {
         // hash the payload and get the result
         let mut res: [u8; 32] = [0; 32];
         hash.finalize(&mut res);
+
+        // Print the hash result for debugging
+        println!("DEBUG: Hash result: {}", hex::encode(&res));
 
         // get the address that results from the hash
         let address = <&Address>::try_from(&res[12..]).unwrap();
@@ -89,10 +100,27 @@ impl SolutionProcessor {
             }
         }
 
+        // Print detailed information about the address
+        println!("DEBUG: Generated address: {}", address);
+        println!("DEBUG: Address bytes: {}", hex::encode(address.as_slice()));
+        println!(
+            "DEBUG: Zeroes: Leading={}, Total={}",
+            leading_zeroes, total_zeroes
+        );
+        println!(
+            "DEBUG: Thresholds: Leading={}, Total={}",
+            self.config.leading_zeroes_threshold, self.config.total_zeroes_threshold
+        );
+
         // Verify this is actually a solution according to our criteria
         let meets_leading_criteria =
             leading_zeroes >= self.config.leading_zeroes_threshold as usize;
         let meets_total_criteria = total_zeroes >= self.config.total_zeroes_threshold as usize;
+
+        println!(
+            "DEBUG: Meets criteria: Leading={}, Total={}",
+            meets_leading_criteria, meets_total_criteria
+        );
 
         // Only process if it meets either criteria
         if meets_leading_criteria || meets_total_criteria {
@@ -115,6 +143,8 @@ impl SolutionProcessor {
 
             let show = format!("{output} ({leading_zeroes} / {total_zeroes})");
 
+            println!("FOUND SOLUTION: {}", show);
+
             // Update found list
             {
                 let mut found_list_guard = self.found_list.lock().unwrap();
@@ -128,6 +158,7 @@ impl SolutionProcessor {
                 thread::spawn(move || {
                     // Use OpenOptions to open the file in append mode
                     if let Ok(mut file) = std::fs::OpenOptions::new()
+                        .create(true)
                         .append(true)
                         .open("efficient_addresses.txt")
                     {

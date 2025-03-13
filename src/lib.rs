@@ -23,10 +23,13 @@ mod reward;
 pub use reward::Reward;
 
 #[cfg(feature = "metal")]
-mod metal;
-
+// mod metal;
 #[cfg(feature = "metal")]
-pub use metal::metal_gpu;
+// pub use metal::metal_gpu;
+#[cfg(feature = "metal")]
+mod metal_backend;
+#[cfg(feature = "metal")]
+pub use metal_backend::metal_gpu;
 
 #[cfg(feature = "metal")]
 pub mod optimize;

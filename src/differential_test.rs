@@ -183,7 +183,8 @@ fn run_single_hash_metal(
     let command_queue = device.new_command_queue();
 
     // Prepare kernel source
-    let kernel_src = crate::metal::kernel::mk_metal_src(config);
+    // let kernel_src = crate::metal::kernel::mk_metal_src(config);
+    let kernel_src = crate::metal_backend::mk_metal_src(config);
 
     // Create Metal library and function
     let options = CompileOptions::new();
