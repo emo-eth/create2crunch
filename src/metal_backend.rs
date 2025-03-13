@@ -8,7 +8,6 @@ use rand::{thread_rng, Rng};
 use separator::Separatable;
 use std::error::Error;
 use std::fmt::Write as _;
-use std::fs::{File, OpenOptions};
 use std::io::prelude::*;
 use std::time::{SystemTime, UNIX_EPOCH};
 use terminal_size::{terminal_size, Height};
@@ -130,9 +129,9 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     let mut work_duration_millis: u64 = 0;
 
     // Create buffers once outside the main loop
-    let message_buffer = device.new_buffer_with_length(4, MTLResourceOptions::StorageModeShared);
-    let nonce_buffer = device.new_buffer_with_length(4, MTLResourceOptions::StorageModeShared);
-    let solutions_buffer = device.new_buffer_with_length(8, MTLResourceOptions::StorageModeShared);
+    let message_buffer = device.new_buffer(4, MTLResourceOptions::StorageModeShared);
+    let nonce_buffer = device.new_buffer(4, MTLResourceOptions::StorageModeShared);
+    let solutions_buffer = device.new_buffer(8, MTLResourceOptions::StorageModeShared);
 
     // begin searching for addresses
     loop {
@@ -354,7 +353,7 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
 
         writeln!(&file, "{output}").expect("Couldn't write to `efficient_addresses.txt` file.");
 
-        file.unlock().expect("Couldn't unlock file.");
+        FileExt::unlock(&file).expect("Couldn't unlock file.");
         found += 1;
     }
 }

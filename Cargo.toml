@@ -27,7 +27,7 @@ panic = "abort"
 codegen-units = 1
 
 [features]
-default = ["opencl"]
+default = ["opencl", "metal"]
 opencl = ["dep:ocl"]
 metal = ["dep:metal"]
 asm = ["alloy-primitives/asm-keccak"]
