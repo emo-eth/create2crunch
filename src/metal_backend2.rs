@@ -211,9 +211,13 @@ fn create_compute_pipeline(
 
     // Determine optimal threadgroup size based on device capabilities
     let max_threads = pipeline_state.max_total_threads_per_threadgroup();
-    let threadgroup_size = MTLSize::new(std::cmp::min(max_threads, 256), 1, 1);
+    let optimal_size = crate::get_optimal_threadgroup_size();
+    let threadgroup_size = MTLSize::new(std::cmp::min(max_threads, optimal_size), 1, 1);
 
-    println!("Using threadgroup size: {}", threadgroup_size.width);
+    println!(
+        "Using threadgroup size: {}, max threads: {}",
+        threadgroup_size.width, max_threads
+    );
 
     // Calculate grid size based on work size
     let grid_size = MTLSize::new(work_size, 1, 1);
@@ -506,6 +510,7 @@ fn spawn_ui_thread(
     state: &MiningState,
     term: Arc<Term>,
     work_size: u64,
+    threadgroup_size: u64,
 ) -> thread::JoinHandle<()> {
     // Clone necessary state for the UI thread
     let term_clone = term.clone();
@@ -579,10 +584,9 @@ fn spawn_ui_thread(
 
             // display information about the optimized search strategy
             let _ = term_clone.write_line(&format!(
-                "search strategy: 4-byte salt (buffer_id + random) | 8-byte nonce (hierarchical_thread_id + counter_nonce)\t\t\
-                 threshold: {} leading or {} total zeroes",
-                leading_zeroes_threshold,
-                total_zeroes_threshold
+                "[Metal2] search strategy: 4-byte salt (random) | 4-byte sequential nonce\t\t\
+                 threadgroup size: {}, threshold: {} leading or {} total zeroes",
+                threadgroup_size, leading_zeroes_threshold, total_zeroes_threshold
             ));
 
             // display recently found solutions based on terminal height
@@ -597,31 +601,26 @@ fn spawn_ui_thread(
     })
 }
 
-/// Generate a unique salt for a command buffer
-fn generate_salt(buffer_idx: usize, rng: &mut impl RngCore) -> FixedBytes<4> {
+/// Generate a unique salt
+fn generate_salt(rng: &mut impl RngCore) -> FixedBytes<4> {
     let mut salt_bytes = [0u8; 4];
     rng.fill_bytes(&mut salt_bytes);
-
-    // Incorporate buffer index into the salt to ensure uniqueness across parallel buffers
-    // Use the lower bits for the buffer index (up to 64 parallel buffers = 6 bits)
-    // and the upper bits for random entropy
-    salt_bytes[0] = buffer_idx as u8;
-
     FixedBytes::<4>::from_slice(&salt_bytes)
 }
 
 /// Generate a unique base nonce for a command buffer
-fn generate_base_nonce(global_nonce_counter: &Arc<Mutex<u32>>, rng: &mut impl RngCore) -> u32 {
+fn generate_base_nonce(
+    global_nonce_counter: &Arc<Mutex<u32>>,
+    rng: &mut impl RngCore,
+    threadgroup_size: u64,
+) -> u32 {
     let mut counter = global_nonce_counter.lock().unwrap();
 
     // Increment the counter to ensure uniqueness
     *counter = counter.wrapping_add(1);
 
-    // Use the counter in the upper bits that aren't used by the thread ID
-    // This ensures no overlap between different command buffers
-    // The thread ID uses 16 bits for group ID and 16 bits for local ID
-    // So we'll use the upper 16 bits for the counter and lower 16 for random entropy
-    (*counter << 16) | (rng.gen::<u32>() & 0xFFFF)
+    // Simply return the counter as the base nonce
+    *counter
 }
 
 /// Update mining statistics after a command buffer completes
@@ -648,6 +647,8 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     // (create if necessary) and open a file where found salts will be written
     Arc::new(crate::output_file());
 
+    println!("Using Metal2 implementation...");
+
     // Get the work size from .env if available
     let work_size = crate::get_work_size();
 
@@ -671,54 +672,51 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     let term = Arc::new(Term::stdout());
 
     // Spawn UI thread
-    let _ui_thread = spawn_ui_thread(&config, &state, term, work_size);
+    let _ui_thread = spawn_ui_thread(
+        &config,
+        &state,
+        term,
+        work_size,
+        pipeline_resources.threadgroup_size.width as u64,
+    );
 
     // Create a random number generator
     let mut rng = thread_rng();
 
-    // Number of parallel command buffers to use
-    let num_parallel_buffers = 3;
-
     // Begin searching for addresses
     loop {
-        // Create multiple command buffers for pipelining
-        let mut command_buffers = Vec::with_capacity(num_parallel_buffers);
+        // Generate a completely unique random salt
+        let salt = generate_salt(&mut rng);
 
-        for buffer_idx in 0..num_parallel_buffers {
-            // Generate a unique salt for this command buffer
-            let salt = generate_salt(buffer_idx, &mut rng);
+        // Generate a unique base nonce
+        let base_nonce = generate_base_nonce(
+            &state.global_nonce_counter,
+            &mut rng,
+            pipeline_resources.threadgroup_size.width as u64,
+        );
 
-            // Generate a unique base nonce for this command buffer
-            let base_nonce = generate_base_nonce(&state.global_nonce_counter, &mut rng);
+        // Update buffer contents
+        update_buffer_contents(&buffers, &salt, base_nonce);
 
-            // Update buffer contents
-            update_buffer_contents(&buffers, &salt, base_nonce);
+        // Create and configure command buffer
+        let command_buffer = create_command_buffer(
+            &pipeline_resources.command_queue,
+            &pipeline_resources.pipeline_state,
+            &buffers,
+            pipeline_resources.grid_size,
+            pipeline_resources.threadgroup_size,
+        );
 
-            // Create and configure command buffer
-            let command_buffer = create_command_buffer(
-                &pipeline_resources.command_queue,
-                &pipeline_resources.pipeline_state,
-                &buffers,
-                pipeline_resources.grid_size,
-                pipeline_resources.threadgroup_size,
-            );
+        // Commit command buffer
+        command_buffer.commit();
 
-            // Commit command buffer
-            command_buffer.commit();
+        // Wait for command buffer to complete
+        command_buffer.wait_until_completed();
 
-            // Store command buffer and salt for later processing
-            command_buffers.push((command_buffer, salt));
-        }
+        // Update mining statistics
+        update_mining_stats(&state);
 
-        // Wait for all command buffers to complete and process results
-        for (buffer, salt) in command_buffers {
-            buffer.wait_until_completed();
-
-            // Update mining statistics
-            update_mining_stats(&state);
-
-            // Process solutions
-            process_solutions(&buffers, &salt, &config, &rewards, &state);
-        }
+        // Process solutions
+        process_solutions(&buffers, &salt, &config, &rewards, &state);
     }
 }

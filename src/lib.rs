@@ -32,6 +32,11 @@ mod metal_backend;
 pub use metal_backend::metal_gpu;
 
 #[cfg(feature = "metal")]
+mod metal_backend2;
+#[cfg(feature = "metal")]
+pub use metal_backend2::metal_gpu as metal_gpu2;
+
+#[cfg(feature = "metal")]
 pub mod optimize;
 
 #[cfg(test)]
@@ -54,6 +59,8 @@ pub enum GpuBackend {
     OpenCL,
     /// Use Metal for GPU computation (macOS only)
     Metal,
+    /// Use Metal2 for GPU computation (alternative implementation, macOS only)
+    Metal2,
 }
 
 impl std::str::FromStr for GpuBackend {
@@ -63,9 +70,10 @@ impl std::str::FromStr for GpuBackend {
         match s.to_lowercase().as_str() {
             "opencl" => Ok(GpuBackend::OpenCL),
             "metal" => Ok(GpuBackend::Metal),
+            "metal2" => Ok(GpuBackend::Metal2),
             "auto" => Ok(detect_preferred_backend()),
             _ => Err(format!(
-                "Invalid backend: {s}. Must be 'opencl', 'metal', or 'auto'"
+                "Invalid backend: {s}. Must be 'opencl', 'metal', 'metal2', or 'auto'"
             )),
         }
     }
@@ -618,6 +626,35 @@ pub fn get_work_size() -> u64 {
 
     // Return the default if no .env file or no valid work size found
     WORK_SIZE
+}
+
+/// Get the optimal threadgroup size from .env file or use default
+pub fn get_optimal_threadgroup_size() -> u64 {
+    if let Ok(lines) = read_lines(".env") {
+        for line in lines.flatten() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+
+            let parts: Vec<&str> = line.split('=').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+
+            let key = parts[0].trim();
+            let value = parts[1].trim();
+
+            if key == "OPTIMAL_THREADGROUP_SIZE" {
+                if let Ok(size) = value.parse::<u64>() {
+                    println!("Using optimal threadgroup size from .env: {}", size);
+                    return size;
+                }
+            }
+        }
+    }
+
+    // Return the default if no .env file or no valid threadgroup size found
+    256
 }
 
 // Helper function to read lines from a file

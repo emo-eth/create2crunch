@@ -166,10 +166,13 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
 
     // Determine optimal threadgroup size based on device capabilities
     let max_threads = pipeline_state.max_total_threads_per_threadgroup();
-    let thread_execution_width = pipeline_state.thread_execution_width();
-    let threadgroup_size = MTLSize::new(std::cmp::min(max_threads, 256), 1, 1);
+    let optimal_size = crate::get_optimal_threadgroup_size();
+    let threadgroup_size = MTLSize::new(std::cmp::min(max_threads, optimal_size), 1, 1);
 
-    println!("Using threadgroup size: {}", threadgroup_size.width);
+    println!(
+        "Using threadgroup size: {}, max threads: {}",
+        threadgroup_size.width, max_threads
+    );
 
     // Calculate grid size based on work size, ensuring it's a multiple of threadgroup size
     let grid_size = MTLSize::new(work_size, 1, 1);
@@ -177,9 +180,6 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     // Global counter for base nonce to ensure uniqueness across command buffers
     // Using u32 since the Metal kernel only uses a 32-bit value for the second part of the nonce
     let global_nonce_counter = Arc::new(Mutex::new(0u32));
-
-    // create a random number generator
-    let rng = thread_rng();
 
     // determine the start time
     let start_time: f64 = SystemTime::now()

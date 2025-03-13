@@ -31,7 +31,7 @@ struct Args {
     #[arg(long, default_value_t = 2)]
     total_zeroes: u8,
 
-    /// GPU backend to use (opencl or metal)
+    /// GPU backend to use (opencl, metal, or metal2)
     #[arg(long, default_value = "opencl")]
     backend: String,
 
@@ -65,6 +65,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let backend = match args.backend.to_lowercase().as_str() {
         "opencl" => GpuBackend::OpenCL,
         "metal" => GpuBackend::Metal,
+        "metal2" => GpuBackend::Metal2,
         _ => return Err(format!("Unknown backend: {}", args.backend).into()),
     };
 
@@ -109,6 +110,18 @@ fn main() -> Result<(), Box<dyn Error>> {
             #[cfg(feature = "metal")]
             {
                 create2crunch::metal_gpu(config)?;
+            }
+            #[cfg(not(feature = "metal"))]
+            {
+                return Err(
+                    "Metal support not compiled in. Recompile with --features metal".into(),
+                );
+            }
+        }
+        GpuBackend::Metal2 => {
+            #[cfg(feature = "metal")]
+            {
+                create2crunch::metal_gpu2(config)?;
             }
             #[cfg(not(feature = "metal"))]
             {
