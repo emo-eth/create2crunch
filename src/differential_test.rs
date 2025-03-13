@@ -1,3 +1,4 @@
+use alloy_primitives::FixedBytes;
 use byteorder::{ByteOrder, LittleEndian};
 use rand::{thread_rng, Rng};
 use std::error::Error;
@@ -25,7 +26,7 @@ fn is_metal_available() -> bool {
 fn run_single_hash_opencl(
     config: &crate::Config,
     message: &[u8],
-    nonce_high: u64,
+    nonce_high: u32,
 ) -> Result<[u8; 32], Box<dyn Error>> {
     use ocl::{Buffer, Context, Device, MemFlags, Platform, Program, Queue};
 
@@ -86,12 +87,12 @@ fn run_single_hash_opencl(
         .copy_host_slice(&fixed_message)
         .build()?;
 
-    // For u64 nonce, we'll use the high 32 bits for the nonce_high parameter
+    // Create nonce buffer with the u32 nonce
     let nonce_buffer = Buffer::<u32>::builder()
         .queue(queue.clone())
         .flags(MemFlags::READ_ONLY)
         .len(1)
-        .copy_host_slice(&[(nonce_high >> 32) as u32])
+        .copy_host_slice(&[nonce_high])
         .build()?;
 
     let solutions_buffer = Buffer::<u64>::builder()
@@ -124,8 +125,12 @@ fn run_single_hash_opencl(
     let mut solution = vec![0u64; 1];
     solutions_buffer.read(&mut solution).enq()?;
 
+    // For the solution, we need to combine the thread ID (0 in our case) with the nonce
+    // to form a u64 value similar to how it's done in the main implementation
+    let full_nonce = solution[0];
+
     // Compute the full hash using the solution
-    let hash = compute_full_hash(config, message, solution[0])?;
+    let hash = compute_full_hash(config, message, full_nonce)?;
 
     Ok(hash)
 }
@@ -135,7 +140,7 @@ fn run_single_hash_opencl(
 fn run_single_hash_metal(
     config: &crate::Config,
     message: &[u8],
-    nonce_high: u64,
+    nonce_high: u32,
 ) -> Result<[u8; 32], Box<dyn Error>> {
     use metal::*;
 
@@ -169,10 +174,9 @@ fn run_single_hash_metal(
         MTLResourceOptions::StorageModeShared,
     );
 
-    // For u64 nonce, we'll use the high 32 bits for the nonce_high parameter
-    let nonce_high_u32 = (nonce_high >> 32) as u32;
+    // Create nonce buffer with the u32 nonce
     let nonce_buffer = device.new_buffer_with_data(
-        &nonce_high_u32 as *const u32 as *const _,
+        &nonce_high as *const u32 as *const _,
         std::mem::size_of::<u32>() as u64,
         MTLResourceOptions::StorageModeShared,
     );
@@ -316,31 +320,28 @@ mod tests {
             // Generate random test data
             let mut rng = thread_rng();
 
-            // For message, randomly choose between 1-4 bytes
-            let msg_len = rng.gen_range(1..=4);
-            let mut test_message = vec![0u8; msg_len];
-            rng.fill(&mut test_message[..]);
+            // Generate a random 4-byte salt (similar to lib.rs)
+            let salt = FixedBytes::<4>::random();
 
-            // Generate random u64 nonce
-            let test_nonce: u64 = rng.gen();
+            // Generate a random 4-byte nonce
+            let nonce: u32 = rng.gen();
 
             println!(
-                "Iteration {}/{}: Testing with message length: {}, message: {:?}, nonce: {}",
+                "Iteration {}/{}: Testing with salt: {:?}, nonce: {}",
                 iteration + 1,
                 TEST_ITERATIONS,
-                msg_len,
-                test_message,
-                test_nonce
+                salt,
+                nonce
             );
 
             // Run OpenCL implementation
             config.backend = GpuBackend::OpenCL;
-            let opencl_result = run_single_hash_opencl(&config, &test_message, test_nonce)
+            let opencl_result = run_single_hash_opencl(&config, &salt[..], nonce)
                 .expect("OpenCL hash computation failed");
 
             // Run Metal implementation
             config.backend = GpuBackend::Metal;
-            let metal_result = run_single_hash_metal(&config, &test_message, test_nonce)
+            let metal_result = run_single_hash_metal(&config, &salt[..], nonce)
                 .expect("Metal hash computation failed");
 
             // Compare results
