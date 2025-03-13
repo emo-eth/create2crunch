@@ -5,6 +5,7 @@ use alloy_primitives::{hex, Address, FixedBytes};
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use console::Term;
 use fs4::FileExt;
+#[cfg(feature = "opencl")]
 use ocl::{Buffer, Context, Device, MemFlags, Platform, ProQue, Program, Queue};
 use rand::{thread_rng, Rng};
 use rayon::prelude::*;
@@ -20,6 +21,9 @@ use tiny_keccak::{Hasher, Keccak};
 mod reward;
 pub use reward::Reward;
 
+#[cfg(feature = "metal")]
+pub mod metal_backend;
+
 // workset size (tweak this!)
 const WORK_SIZE: u32 = 0x4000000; // max. 0x15400000 to abs. max 0xffffffff
 
@@ -27,7 +31,16 @@ const WORK_FACTOR: u128 = (WORK_SIZE as u128) / 1_000_000;
 const CONTROL_CHARACTER: u8 = 0xff;
 const MAX_INCREMENTER: u64 = 0xffffffffffff;
 
+#[cfg(feature = "opencl")]
 static KERNEL_SRC: &str = include_str!("./kernels/keccak256.cl");
+
+/// GPU backend to use for computation
+pub enum GpuBackend {
+    /// Use OpenCL for GPU computation
+    OpenCL,
+    /// Use Metal for GPU computation (macOS only)
+    Metal,
+}
 
 /// Requires three hex-encoded arguments: the address of the contract that will
 /// be calling CREATE2, the address of the caller of said contract *(assuming
@@ -45,6 +58,7 @@ pub struct Config {
     pub gpu_device: u8,
     pub leading_zeroes_threshold: u8,
     pub total_zeroes_threshold: u8,
+    pub backend: GpuBackend,
 }
 
 /// Validate the provided arguments and construct the Config struct.
@@ -75,6 +89,10 @@ impl Config {
             Some(arg) => arg,
             None => String::from("5"),
         };
+        let backend_string = match args.next() {
+            Some(arg) => arg,
+            None => String::from("auto"), // auto-detect the best backend
+        };
 
         // convert main arguments from hex string to vector of bytes
         let Ok(factory_address_vec) = hex::decode(factory_address_string) else {
@@ -98,17 +116,22 @@ impl Config {
             return Err("invalid length for initialization code hash argument");
         };
 
-        // convert gpu arguments to u8 values
+        // convert gpu device from string to u8
         let Ok(gpu_device) = gpu_device_string.parse::<u8>() else {
-            return Err("invalid gpu device value");
-        };
-        let Ok(leading_zeroes_threshold) = leading_zeroes_threshold_string.parse::<u8>() else {
-            return Err("invalid leading zeroes threshold value supplied");
-        };
-        let Ok(total_zeroes_threshold) = total_zeroes_threshold_string.parse::<u8>() else {
-            return Err("invalid total zeroes threshold value supplied");
+            return Err("could not parse gpu device argument");
         };
 
+        // convert leading zeroes threshold from string to u8
+        let Ok(leading_zeroes_threshold) = leading_zeroes_threshold_string.parse::<u8>() else {
+            return Err("could not parse leading zeroes threshold argument");
+        };
+
+        // convert total zeroes threshold from string to u8
+        let Ok(total_zeroes_threshold) = total_zeroes_threshold_string.parse::<u8>() else {
+            return Err("could not parse total zeroes threshold argument");
+        };
+
+        // Validate threshold values
         if leading_zeroes_threshold > 20 {
             return Err("invalid value for leading zeroes threshold argument. (valid: 0..=20)");
         }
@@ -116,15 +139,40 @@ impl Config {
             return Err("invalid value for total zeroes threshold argument. (valid: 0..=20 | 255)");
         }
 
-        Ok(Self {
+        // determine the backend to use
+        let backend = match backend_string.to_lowercase().as_str() {
+            "opencl" => GpuBackend::OpenCL,
+            "metal" => GpuBackend::Metal,
+            "auto" => detect_preferred_backend(),
+            _ => return Err("invalid backend argument (must be 'opencl', 'metal', or 'auto')"),
+        };
+
+        Ok(Config {
             factory_address,
             calling_address,
             init_code_hash,
             gpu_device,
             leading_zeroes_threshold,
             total_zeroes_threshold,
+            backend,
         })
     }
+}
+
+/// Auto-detect the preferred backend based on the platform
+#[cfg(target_os = "macos")]
+fn detect_preferred_backend() -> GpuBackend {
+    #[cfg(feature = "metal")]
+    return GpuBackend::Metal;
+
+    #[cfg(not(feature = "metal"))]
+    return GpuBackend::OpenCL;
+}
+
+/// Auto-detect the preferred backend based on the platform
+#[cfg(not(target_os = "macos"))]
+fn detect_preferred_backend() -> GpuBackend {
+    GpuBackend::OpenCL
 }
 
 /// Given a Config object with a factory address, a caller address, and a
@@ -256,6 +304,8 @@ pub fn cpu(config: Config) -> Result<(), Box<dyn Error>> {
 ///
 /// This method is still highly experimental and could almost certainly use
 /// further optimization - contributions are more than welcome!
+/// OpenCL GPU implementation for finding efficient Ethereum addresses
+#[cfg(feature = "opencl")]
 pub fn gpu(config: Config) -> ocl::Result<()> {
     println!(
         "Setting up experimental OpenCL miner using device {}...",

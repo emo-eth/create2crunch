@@ -10,7 +10,8 @@ alloy-primitives = { version = "0.5", features = ["rand"] }
 byteorder = "1.5"
 console = "0.15"
 fs4 = "0.7"
-ocl = "0.19"
+ocl = { version = "0.19", optional = true }
+metal = { version = "0.31", optional = true }
 rand = "0.8"
 rayon = "1.0"
 rustc-hash = "1.1"
@@ -26,5 +27,7 @@ panic = "abort"
 codegen-units = 1
 
 [features]
-default = []
+default = ["opencl"]
+opencl = ["dep:ocl"]
+metal = ["dep:metal"]
 asm = ["alloy-primitives/asm-keccak"]
