@@ -1,12 +1,10 @@
+use clap::Parser;
 use create2crunch::{Config, GpuBackend};
-use std::env;
 use std::process;
 
 fn main() {
-    let config = Config::new(env::args()).unwrap_or_else(|err| {
-        eprintln!("Failed parsing arguments: {err}");
-        process::exit(1);
-    });
+    // Parse command-line arguments using clap
+    let config = Config::parse();
 
     if config.gpu_device == 255 {
         if let Err(e) = create2crunch::cpu(config) {

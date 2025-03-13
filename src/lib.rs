@@ -3,6 +3,7 @@
 
 use alloy_primitives::{hex, Address, FixedBytes};
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
+use clap::Parser;
 use console::Term;
 use fs4::FileExt;
 #[cfg(feature = "opencl")]
@@ -35,11 +36,27 @@ const MAX_INCREMENTER: u64 = 0xffffffffffff;
 static KERNEL_SRC: &str = include_str!("./kernels/keccak256.cl");
 
 /// GPU backend to use for computation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GpuBackend {
     /// Use OpenCL for GPU computation
     OpenCL,
     /// Use Metal for GPU computation (macOS only)
     Metal,
+}
+
+impl std::str::FromStr for GpuBackend {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "opencl" => Ok(GpuBackend::OpenCL),
+            "metal" => Ok(GpuBackend::Metal),
+            "auto" => Ok(detect_preferred_backend()),
+            _ => Err(format!(
+                "Invalid backend: {s}. Must be 'opencl', 'metal', or 'auto'"
+            )),
+        }
+    }
 }
 
 /// Requires three hex-encoded arguments: the address of the contract that will
@@ -51,112 +68,81 @@ pub enum GpuBackend {
 /// of three optional values may be provided: a device to target for OpenCL GPU
 /// search, a threshold for leading zeroes to search for, and a threshold for
 /// total zeroes to search for.
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
 pub struct Config {
+    /// The address of the contract that will call CREATE2 (hex without 0x prefix)
+    #[arg(long, value_parser = parse_eth_address)]
     pub factory_address: [u8; 20],
+
+    /// The address of the caller of the factory contract (hex without 0x prefix)
+    #[arg(long, value_parser = parse_eth_address)]
     pub calling_address: [u8; 20],
+
+    /// The keccak-256 hash of the bytecode that will be used to initialize the new contract (hex without 0x prefix)
+    #[arg(long, value_parser = parse_init_code_hash)]
     pub init_code_hash: [u8; 32],
+
+    /// The GPU device ID to use (255 for CPU)
+    #[arg(long, default_value = "255")]
     pub gpu_device: u8,
+
+    /// Minimum number of leading zero bytes to search for
+    #[arg(long, default_value = "3", value_parser = parse_leading_zeroes)]
     pub leading_zeroes_threshold: u8,
+
+    /// Minimum number of total zero bytes to search for
+    #[arg(long, default_value = "5", value_parser = parse_total_zeroes)]
     pub total_zeroes_threshold: u8,
+
+    /// GPU backend to use - "opencl", "metal", or "auto"
+    #[arg(long, default_value = "auto")]
     pub backend: GpuBackend,
 }
 
-/// Validate the provided arguments and construct the Config struct.
-impl Config {
-    pub fn new(mut args: std::env::Args) -> Result<Self, &'static str> {
-        // get args, skipping first arg (program name)
-        args.next();
+/// Parse an Ethereum address from a hex string
+fn parse_eth_address(s: &str) -> Result<[u8; 20], String> {
+    let s = s.trim_start_matches("0x");
+    let vec = hex::decode(s).map_err(|_| format!("Could not decode address: {s}"))?;
+    let len = vec.len();
+    vec.try_into()
+        .map_err(|_| format!("Invalid address length: {}", len))
+}
 
-        let Some(factory_address_string) = args.next() else {
-            return Err("didn't get a factory_address argument");
-        };
-        let Some(calling_address_string) = args.next() else {
-            return Err("didn't get a calling_address argument");
-        };
-        let Some(init_code_hash_string) = args.next() else {
-            return Err("didn't get an init_code_hash argument");
-        };
+/// Parse an initialization code hash from a hex string
+fn parse_init_code_hash(s: &str) -> Result<[u8; 32], String> {
+    let s = s.trim_start_matches("0x");
+    let vec =
+        hex::decode(s).map_err(|_| format!("Could not decode initialization code hash: {s}"))?;
+    let len = vec.len();
+    vec.try_into()
+        .map_err(|_| format!("Invalid initialization code hash length: {}", len))
+}
 
-        let gpu_device_string = match args.next() {
-            Some(arg) => arg,
-            None => String::from("255"), // indicates that CPU will be used.
-        };
-        let leading_zeroes_threshold_string = match args.next() {
-            Some(arg) => arg,
-            None => String::from("3"),
-        };
-        let total_zeroes_threshold_string = match args.next() {
-            Some(arg) => arg,
-            None => String::from("5"),
-        };
-        let backend_string = match args.next() {
-            Some(arg) => arg,
-            None => String::from("auto"), // auto-detect the best backend
-        };
-
-        // convert main arguments from hex string to vector of bytes
-        let Ok(factory_address_vec) = hex::decode(factory_address_string) else {
-            return Err("could not decode factory address argument");
-        };
-        let Ok(calling_address_vec) = hex::decode(calling_address_string) else {
-            return Err("could not decode calling address argument");
-        };
-        let Ok(init_code_hash_vec) = hex::decode(init_code_hash_string) else {
-            return Err("could not decode initialization code hash argument");
-        };
-
-        // convert from vector to fixed array
-        let Ok(factory_address) = factory_address_vec.try_into() else {
-            return Err("invalid length for factory address argument");
-        };
-        let Ok(calling_address) = calling_address_vec.try_into() else {
-            return Err("invalid length for calling address argument");
-        };
-        let Ok(init_code_hash) = init_code_hash_vec.try_into() else {
-            return Err("invalid length for initialization code hash argument");
-        };
-
-        // convert gpu device from string to u8
-        let Ok(gpu_device) = gpu_device_string.parse::<u8>() else {
-            return Err("could not parse gpu device argument");
-        };
-
-        // convert leading zeroes threshold from string to u8
-        let Ok(leading_zeroes_threshold) = leading_zeroes_threshold_string.parse::<u8>() else {
-            return Err("could not parse leading zeroes threshold argument");
-        };
-
-        // convert total zeroes threshold from string to u8
-        let Ok(total_zeroes_threshold) = total_zeroes_threshold_string.parse::<u8>() else {
-            return Err("could not parse total zeroes threshold argument");
-        };
-
-        // Validate threshold values
-        if leading_zeroes_threshold > 20 {
-            return Err("invalid value for leading zeroes threshold argument. (valid: 0..=20)");
-        }
-        if total_zeroes_threshold > 20 && total_zeroes_threshold != 255 {
-            return Err("invalid value for total zeroes threshold argument. (valid: 0..=20 | 255)");
-        }
-
-        // determine the backend to use
-        let backend = match backend_string.to_lowercase().as_str() {
-            "opencl" => GpuBackend::OpenCL,
-            "metal" => GpuBackend::Metal,
-            "auto" => detect_preferred_backend(),
-            _ => return Err("invalid backend argument (must be 'opencl', 'metal', or 'auto')"),
-        };
-
-        Ok(Config {
-            factory_address,
-            calling_address,
-            init_code_hash,
-            gpu_device,
-            leading_zeroes_threshold,
-            total_zeroes_threshold,
-            backend,
-        })
+/// Parse and validate leading zeroes threshold
+fn parse_leading_zeroes(s: &str) -> Result<u8, String> {
+    let value = s
+        .parse::<u8>()
+        .map_err(|_| format!("Invalid leading zeroes threshold: {s}"))?;
+    if value > 20 {
+        return Err(
+            "Invalid value for leading zeroes threshold argument. (valid: 0..=20)".to_string(),
+        );
     }
+    Ok(value)
+}
+
+/// Parse and validate total zeroes threshold
+fn parse_total_zeroes(s: &str) -> Result<u8, String> {
+    let value = s
+        .parse::<u8>()
+        .map_err(|_| format!("Invalid total zeroes threshold: {s}"))?;
+    if value > 20 && value != 255 {
+        return Err(
+            "Invalid value for total zeroes threshold argument. (valid: 0..=20 | 255)".to_string(),
+        );
+    }
+    Ok(value)
 }
 
 /// Auto-detect the preferred backend based on the platform
