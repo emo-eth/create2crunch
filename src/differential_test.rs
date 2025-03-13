@@ -24,8 +24,8 @@ fn is_metal_available() -> bool {
 #[cfg(feature = "opencl")]
 fn run_single_hash_opencl(
     config: &crate::Config,
-    message: &[u8; 4],
-    nonce_high: u32,
+    message: &[u8],
+    nonce_high: u64,
 ) -> Result<[u8; 32], Box<dyn Error>> {
     use ocl::{Buffer, Context, Device, MemFlags, Platform, Program, Queue};
 
@@ -72,19 +72,26 @@ fn run_single_hash_opencl(
         .src(kernel_src)
         .build(&context)?;
 
+    // Create a fixed-size message buffer (4 bytes) for the kernel
+    // If message is shorter, pad with zeros; if longer, truncate
+    let mut fixed_message = [0u8; 4];
+    let copy_len = std::cmp::min(message.len(), 4);
+    fixed_message[..copy_len].copy_from_slice(&message[..copy_len]);
+
     // Create buffers
     let message_buffer = Buffer::<u8>::builder()
         .queue(queue.clone())
         .flags(MemFlags::READ_ONLY)
         .len(4)
-        .copy_host_slice(message)
+        .copy_host_slice(&fixed_message)
         .build()?;
 
+    // For u64 nonce, we'll use the high 32 bits for the nonce_high parameter
     let nonce_buffer = Buffer::<u32>::builder()
         .queue(queue.clone())
         .flags(MemFlags::READ_ONLY)
         .len(1)
-        .copy_host_slice(&[nonce_high])
+        .copy_host_slice(&[(nonce_high >> 32) as u32])
         .build()?;
 
     let solutions_buffer = Buffer::<u64>::builder()
@@ -127,8 +134,8 @@ fn run_single_hash_opencl(
 #[cfg(feature = "metal")]
 fn run_single_hash_metal(
     config: &crate::Config,
-    message: &[u8; 4],
-    nonce_high: u32,
+    message: &[u8],
+    nonce_high: u64,
 ) -> Result<[u8; 32], Box<dyn Error>> {
     use metal::*;
 
@@ -149,15 +156,23 @@ fn run_single_hash_metal(
     // Create pipeline state
     let pipeline_state = device.new_compute_pipeline_state_with_function(&function)?;
 
+    // Create a fixed-size message buffer (4 bytes) for the kernel
+    // If message is shorter, pad with zeros; if longer, truncate
+    let mut fixed_message = [0u8; 4];
+    let copy_len = std::cmp::min(message.len(), 4);
+    fixed_message[..copy_len].copy_from_slice(&message[..copy_len]);
+
     // Create buffers
     let message_buffer = device.new_buffer_with_data(
-        message.as_ptr() as *const _,
-        message.len() as u64,
+        fixed_message.as_ptr() as *const _,
+        fixed_message.len() as u64,
         MTLResourceOptions::StorageModeShared,
     );
 
+    // For u64 nonce, we'll use the high 32 bits for the nonce_high parameter
+    let nonce_high_u32 = (nonce_high >> 32) as u32;
     let nonce_buffer = device.new_buffer_with_data(
-        &nonce_high as *const u32 as *const _,
+        &nonce_high_u32 as *const u32 as *const _,
         std::mem::size_of::<u32>() as u64,
         MTLResourceOptions::StorageModeShared,
     );
@@ -208,7 +223,7 @@ fn run_single_hash_metal(
 // Compute the full Keccak-256 hash using the CPU implementation
 fn compute_full_hash(
     config: &crate::Config,
-    message: &[u8; 4],
+    message: &[u8],
     nonce: u64,
 ) -> Result<[u8; 32], Box<dyn Error>> {
     use tiny_keccak::{Hasher, Keccak};
@@ -228,11 +243,14 @@ fn compute_full_hash(
         buffer[i + 21] = byte;
     }
 
-    // Message
-    buffer[41] = message[0];
-    buffer[42] = message[1];
-    buffer[43] = message[2];
-    buffer[44] = message[3];
+    // Message - handle variable length
+    let msg_len = message.len();
+    if msg_len > 0 {
+        let copy_len = std::cmp::min(msg_len, 4); // Limit to 4 bytes for now to match kernel
+        for i in 0..copy_len {
+            buffer[41 + i] = message[i];
+        }
+    }
 
     // Nonce
     let mut nonce_bytes = [0u8; 8];
@@ -289,36 +307,60 @@ mod tests {
 
         let mut config = create_test_config();
 
-        // Generate random test data
-        let mut rng = thread_rng();
-        let test_message: [u8; 4] = rng.gen();
-        let test_nonce: u32 = rng.gen();
+        // Number of test iterations
+        const TEST_ITERATIONS: usize = 10;
+
+        println!("Running {} test iterations", TEST_ITERATIONS);
+
+        for iteration in 0..TEST_ITERATIONS {
+            // Generate random test data
+            let mut rng = thread_rng();
+
+            // For message, randomly choose between 1-4 bytes
+            let msg_len = rng.gen_range(1..=4);
+            let mut test_message = vec![0u8; msg_len];
+            rng.fill(&mut test_message[..]);
+
+            // Generate random u64 nonce
+            let test_nonce: u64 = rng.gen();
+
+            println!(
+                "Iteration {}/{}: Testing with message length: {}, message: {:?}, nonce: {}",
+                iteration + 1,
+                TEST_ITERATIONS,
+                msg_len,
+                test_message,
+                test_nonce
+            );
+
+            // Run OpenCL implementation
+            config.backend = GpuBackend::OpenCL;
+            let opencl_result = run_single_hash_opencl(&config, &test_message, test_nonce)
+                .expect("OpenCL hash computation failed");
+
+            // Run Metal implementation
+            config.backend = GpuBackend::Metal;
+            let metal_result = run_single_hash_metal(&config, &test_message, test_nonce)
+                .expect("Metal hash computation failed");
+
+            // Compare results
+            assert_eq!(
+                opencl_result, metal_result,
+                "OpenCL and Metal implementations produced different results!\nOpenCL: {:?}\nMetal: {:?}",
+                opencl_result, metal_result
+            );
+
+            println!(
+                "Iteration {}/{}: OpenCL and Metal implementations match! Result: {:?}",
+                iteration + 1,
+                TEST_ITERATIONS,
+                opencl_result
+            );
+        }
 
         println!(
-            "Testing with message: {:?}, nonce: {}",
-            test_message, test_nonce
-        );
-
-        // Run OpenCL implementation
-        config.backend = GpuBackend::OpenCL;
-        let opencl_result = run_single_hash_opencl(&config, &test_message, test_nonce)
-            .expect("OpenCL hash computation failed");
-
-        // Run Metal implementation
-        config.backend = GpuBackend::Metal;
-        let metal_result = run_single_hash_metal(&config, &test_message, test_nonce)
-            .expect("Metal hash computation failed");
-
-        // Compare results
-        assert_eq!(
-            opencl_result, metal_result,
-            "OpenCL and Metal implementations produced different results!\nOpenCL: {:?}\nMetal: {:?}",
-            opencl_result, metal_result
-        );
-
-        println!(
-            "OpenCL and Metal implementations match! Result: {:?}",
-            opencl_result
+            "All {} test iterations passed successfully!",
+            TEST_ITERATIONS
         );
     }
 
