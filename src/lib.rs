@@ -43,7 +43,7 @@ pub mod optimize;
 mod differential_test;
 
 // Default work size
-pub const WORK_SIZE: u64 = 1048576; // 2^20
+pub const WORK_SIZE: u64 = 134_217_728; // 2^27
 
 const WORK_FACTOR: u128 = (WORK_SIZE as u128) / 1_000_000;
 const CONTROL_CHARACTER: u8 = 0xff;
