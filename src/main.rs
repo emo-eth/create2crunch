@@ -85,10 +85,19 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     // If optimization is requested, run the optimization process
     if config.optimize {
-        if config.two_phase {
-            return create2crunch::optimize::two_phase_optimization(&config);
-        } else {
-            return create2crunch::optimize::grid_search(&config, config.benchmark_duration);
+        #[cfg(feature = "metal")]
+        {
+            if config.two_phase {
+                return create2crunch::optimize::two_phase_optimization(&config);
+            } else {
+                return create2crunch::optimize::grid_search(&config, config.benchmark_duration);
+            }
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            return Err(
+                "Optimization requires Metal support. Recompile with --features metal".into(),
+            );
         }
     }
 
