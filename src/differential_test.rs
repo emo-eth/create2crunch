@@ -135,6 +135,40 @@ fn run_single_hash_opencl(
     Ok(hash)
 }
 
+#[cfg(feature = "metal")]
+use metal::*;
+
+#[cfg(feature = "metal")]
+// Safety wrapper for ComputeCommandEncoder to prevent context leaks
+struct SafeEncoder<'a> {
+    encoder: &'a ComputeCommandEncoderRef,
+    ended: bool,
+}
+
+#[cfg(feature = "metal")]
+impl<'a> SafeEncoder<'a> {
+    fn new(encoder: &'a ComputeCommandEncoderRef) -> Self {
+        SafeEncoder {
+            encoder,
+            ended: false,
+        }
+    }
+
+    fn end_encoding(&mut self) {
+        if !self.ended {
+            self.encoder.end_encoding();
+            self.ended = true;
+        }
+    }
+}
+
+#[cfg(feature = "metal")]
+impl<'a> Drop for SafeEncoder<'a> {
+    fn drop(&mut self) {
+        self.end_encoding();
+    }
+}
+
 // Run a single hash computation using Metal
 #[cfg(feature = "metal")]
 fn run_single_hash_metal(
@@ -142,8 +176,6 @@ fn run_single_hash_metal(
     message: &[u8],
     nonce_high: u32,
 ) -> Result<[u8; 32], Box<dyn Error>> {
-    use metal::*;
-
     // Get the default device
     let device = Device::system_default().unwrap();
 
@@ -186,6 +218,13 @@ fn run_single_hash_metal(
         MTLResourceOptions::StorageModeShared,
     );
 
+    // Create a counter buffer for solution count
+    let counter_buffer = device.new_buffer_with_data(
+        [0u32; 1].as_ptr() as *const _,
+        std::mem::size_of::<u32>() as u64,
+        MTLResourceOptions::StorageModeShared,
+    );
+
     // Clear solutions buffer
     let zeros = [0u64; 1];
     let solutions_ptr = solutions_buffer.contents() as *mut u64;
@@ -196,19 +235,27 @@ fn run_single_hash_metal(
     // Create command buffer and encoder
     let command_buffer = command_queue.new_command_buffer();
     let compute_encoder = command_buffer.new_compute_command_encoder();
+    let mut safe_encoder = SafeEncoder::new(&compute_encoder);
 
     // Set pipeline state and buffers
-    compute_encoder.set_compute_pipeline_state(&pipeline_state);
-    compute_encoder.set_buffer(0, Some(&message_buffer), 0);
-    compute_encoder.set_buffer(1, Some(&nonce_buffer), 0);
-    compute_encoder.set_buffer(2, Some(&solutions_buffer), 0);
+    safe_encoder
+        .encoder
+        .set_compute_pipeline_state(&pipeline_state);
+    safe_encoder.encoder.set_buffer(0, Some(&message_buffer), 0);
+    safe_encoder.encoder.set_buffer(1, Some(&nonce_buffer), 0);
+    safe_encoder
+        .encoder
+        .set_buffer(2, Some(&solutions_buffer), 0);
+    safe_encoder.encoder.set_buffer(3, Some(&counter_buffer), 0);
 
     // Dispatch a single thread for testing
     let thread_group_size = MTLSize::new(1, 1, 1);
     let thread_groups_per_grid = MTLSize::new(1, 1, 1);
 
-    compute_encoder.dispatch_thread_groups(thread_groups_per_grid, thread_group_size);
-    compute_encoder.end_encoding();
+    safe_encoder
+        .encoder
+        .dispatch_thread_groups(thread_groups_per_grid, thread_group_size);
+    safe_encoder.end_encoding();
 
     // Commit and wait
     command_buffer.commit();
@@ -296,6 +343,9 @@ mod tests {
             leading_zeroes_threshold: 1, // Low threshold for testing
             total_zeroes_threshold: 2,   // Low threshold for testing
             backend: GpuBackend::OpenCL, // Will be overridden in tests
+            optimize: false,             // Not running in optimization mode
+            two_phase: false,            // Not using two-phase optimization
+            benchmark_duration: 1,       // Default benchmark duration
         }
     }
 

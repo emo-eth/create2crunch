@@ -6,6 +6,7 @@ use fs4::FileExt;
 use metal::*;
 use rand::{thread_rng, Rng};
 use separator::Separatable;
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt::Write as _;
 use std::io::prelude::*;
@@ -14,6 +15,62 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use terminal_size::{terminal_size, Height};
 use tiny_keccak::{Hasher, Keccak};
+
+// Safety wrapper for ComputeCommandEncoder to prevent context leaks
+struct SafeEncoder<'a> {
+    encoder: &'a ComputeCommandEncoderRef,
+    ended: bool,
+}
+
+impl<'a> SafeEncoder<'a> {
+    fn new(encoder: &'a ComputeCommandEncoderRef) -> Self {
+        SafeEncoder {
+            encoder,
+            ended: false,
+        }
+    }
+
+    fn end_encoding(&mut self) {
+        if !self.ended {
+            self.encoder.end_encoding();
+            self.ended = true;
+        }
+    }
+}
+
+impl<'a> Drop for SafeEncoder<'a> {
+    fn drop(&mut self) {
+        self.end_encoding();
+    }
+}
+
+// Safety wrapper for BlitCommandEncoder to prevent context leaks
+struct SafeBlitEncoder<'a> {
+    encoder: &'a BlitCommandEncoderRef,
+    ended: bool,
+}
+
+impl<'a> SafeBlitEncoder<'a> {
+    fn new(encoder: &'a BlitCommandEncoderRef) -> Self {
+        SafeBlitEncoder {
+            encoder,
+            ended: false,
+        }
+    }
+
+    fn end_encoding(&mut self) {
+        if !self.ended {
+            self.encoder.end_encoding();
+            self.ended = true;
+        }
+    }
+}
+
+impl<'a> Drop for SafeBlitEncoder<'a> {
+    fn drop(&mut self) {
+        self.end_encoding();
+    }
+}
 
 static KERNEL_SRC: &str = include_str!("./kernels/keccak256.metal");
 
@@ -45,6 +102,10 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
         config.gpu_device
     );
 
+    // Get the work size from .env if available
+    let work_size = crate::get_work_size();
+    println!("Using work size: {}", work_size);
+
     // (create if necessary) and open a file where found salts will be written
     let file = Arc::new(crate::output_file());
 
@@ -54,6 +115,9 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     // track how many addresses have been found and information about them
     let found = Arc::new(Mutex::new(0u64));
     let found_list = Arc::new(Mutex::new(Vec::<String>::new()));
+
+    // Track processed solutions to avoid duplicates
+    let processed_solutions = Arc::new(Mutex::new(HashSet::<String>::new()));
 
     // set up a controller for terminal output
     let term = Arc::new(Term::stdout());
@@ -110,7 +174,7 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     println!("Using threadgroup size: {}", threadgroup_size.width);
 
     // Calculate grid size based on work size, ensuring it's a multiple of threadgroup size
-    let grid_size = MTLSize::new(WORK_SIZE as u64, 1, 1);
+    let grid_size = MTLSize::new(work_size, 1, 1);
 
     // create a random number generator
     let mut rng = thread_rng();
@@ -178,6 +242,7 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     let init_code_hash = config.init_code_hash.clone();
     let leading_zeroes_threshold = config.leading_zeroes_threshold;
     let total_zeroes_threshold = config.total_zeroes_threshold;
+    let processed_solutions_clone = processed_solutions.clone();
 
     let term_clone = term.clone();
     let found_clone = found.clone();
@@ -219,7 +284,7 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
             let current_rate = *rate_clone.lock().unwrap();
 
             // determine the number of attempts being made per second
-            let work_rate: u128 = (WORK_SIZE as u128) * cumulative as u128 / 1_000_000;
+            let work_rate: u128 = (work_size as u128) * cumulative as u128 / 1_000_000;
 
             // calculate the terminal height, defaulting to a height of ten rows
             let height = terminal_size().map(|(_w, Height(h))| h).unwrap_or(10);
@@ -232,7 +297,7 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
                 total_runtime_mins,
                 total_runtime_secs,
                 cumulative,
-                WORK_SIZE.separated_string(),
+                work_size.separated_string(),
             ));
 
             // display information about the attempt rate and found solutions
@@ -259,29 +324,30 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
 
     // begin searching for addresses
     loop {
-        // construct the 4-byte message to hash
-        let salt = FixedBytes::<4>::random();
-
-        // Update message buffer contents
-        if let Some(staging) = &staging_message_buffer {
-            let message_ptr = staging.contents() as *mut u8;
-            unsafe {
-                std::ptr::copy_nonoverlapping(salt.as_ptr(), message_ptr, 4);
-            }
-        } else {
-            let message_ptr = message_buffer.contents() as *mut u8;
-            unsafe {
-                std::ptr::copy_nonoverlapping(salt.as_ptr(), message_ptr, 4);
-            }
-        }
-
-        // reset nonce & initialize it to a random value for better distribution
-        let mut nonce: [u32; 1] = rng.gen();
-
         // Create multiple command buffers for pipelining
         let mut command_buffers = Vec::with_capacity(num_parallel_buffers);
 
-        for _ in 0..num_parallel_buffers {
+        for buffer_idx in 0..num_parallel_buffers {
+            // Generate a completely unique random salt for each command buffer
+            // This ensures different command buffers work on completely different salt spaces
+            let salt = FixedBytes::<4>::random();
+
+            // Update message buffer contents with the unique salt
+            if let Some(staging) = &staging_message_buffer {
+                let message_ptr = staging.contents() as *mut u8;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(salt.as_ptr(), message_ptr, 4);
+                }
+            } else {
+                let message_ptr = message_buffer.contents() as *mut u8;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(salt.as_ptr(), message_ptr, 4);
+                }
+            }
+
+            // reset nonce & initialize it to a random value for better distribution
+            let mut nonce: [u32; 1] = rng.gen();
+
             // Update nonce buffer contents
             if let Some(staging) = &staging_nonce_buffer {
                 let nonce_ptr = staging.contents() as *mut u32;
@@ -301,51 +367,65 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
                 *counter_ptr = 0;
             }
 
-            // Create command buffer
+            // Create command buffer and encoder
             let command_buffer = command_queue.new_command_buffer();
-
-            // Create compute command encoder
-            let compute_encoder = command_buffer.new_compute_command_encoder();
+            let mut compute_encoder =
+                SafeEncoder::new(&command_buffer.new_compute_command_encoder());
 
             // Set compute pipeline
-            compute_encoder.set_compute_pipeline_state(&pipeline_state);
+            compute_encoder
+                .encoder
+                .set_compute_pipeline_state(&pipeline_state);
 
             // Copy from staging buffers if needed
             if let Some(staging) = &staging_message_buffer {
-                let blit_encoder = command_buffer.new_blit_command_encoder();
-                blit_encoder.copy_from_buffer(&staging, 0, &message_buffer, 0, 4);
+                let mut blit_encoder =
+                    SafeBlitEncoder::new(&command_buffer.new_blit_command_encoder());
+                blit_encoder
+                    .encoder
+                    .copy_from_buffer(&staging, 0, &message_buffer, 0, 4);
                 blit_encoder.end_encoding();
             }
 
             if let Some(staging) = &staging_nonce_buffer {
-                let blit_encoder = command_buffer.new_blit_command_encoder();
-                blit_encoder.copy_from_buffer(&staging, 0, &nonce_buffer, 0, 4);
+                let mut blit_encoder =
+                    SafeBlitEncoder::new(&command_buffer.new_blit_command_encoder());
+                blit_encoder
+                    .encoder
+                    .copy_from_buffer(&staging, 0, &nonce_buffer, 0, 4);
                 blit_encoder.end_encoding();
             }
 
             // Set buffers
-            compute_encoder.set_buffer(0, Some(&message_buffer), 0);
-            compute_encoder.set_buffer(1, Some(&nonce_buffer), 0);
-            compute_encoder.set_buffer(2, Some(&solutions_buffer), 0);
-            compute_encoder.set_buffer(3, Some(&counter_buffer), 0);
+            compute_encoder
+                .encoder
+                .set_buffer(0, Some(&message_buffer), 0);
+            compute_encoder
+                .encoder
+                .set_buffer(1, Some(&nonce_buffer), 0);
+            compute_encoder
+                .encoder
+                .set_buffer(2, Some(&solutions_buffer), 0);
+            compute_encoder
+                .encoder
+                .set_buffer(3, Some(&counter_buffer), 0);
 
             // Dispatch threads
-            compute_encoder.dispatch_threads(grid_size, threadgroup_size);
+            compute_encoder
+                .encoder
+                .dispatch_threads(grid_size, threadgroup_size);
 
-            // End encoding
+            // End encoding - will be called automatically by Drop, but we do it explicitly for clarity
             compute_encoder.end_encoding();
 
             // Instead of using a completion handler, we'll just wait for each command buffer
             // and process results immediately
             command_buffer.commit();
-            command_buffers.push(command_buffer);
-
-            // Increment nonce for next buffer
-            nonce[0] = nonce[0].wrapping_add(WORK_SIZE as u32);
+            command_buffers.push((command_buffer, salt)); // Store the salt with the command buffer
         }
 
         // Wait for all command buffers to complete and process results
-        for buffer in command_buffers {
+        for (buffer, salt) in command_buffers {
             buffer.wait_until_completed();
 
             // Increment the cumulative nonce
@@ -371,6 +451,11 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
             if num_solutions > 0 {
                 // Process all solutions
                 let solutions_ptr = solutions_buffer.contents() as *const u64;
+
+                // Track salts we've already processed in this batch
+                let mut processed_salts = HashSet::new();
+                let salt_hex = hex::encode(&salt[..]);
+
                 for i in 0..std::cmp::min(num_solutions as usize, max_solutions) {
                     let solution = unsafe { *solutions_ptr.add(i) };
                     if solution == 0 {
@@ -378,6 +463,28 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
                     }
 
                     let solution_bytes = solution.to_le_bytes();
+
+                    // Create a unique identifier for this solution
+                    let solution_id =
+                        format!("{}{}", hex::encode(&salt[..]), hex::encode(&solution_bytes));
+
+                    // Check if we've already processed this solution
+                    let mut processed_guard = processed_solutions.lock().unwrap();
+                    if processed_guard.contains(&solution_id) {
+                        continue;
+                    }
+
+                    // Check if we've already processed a solution with this salt in this batch
+                    if processed_salts.contains(&salt_hex) {
+                        continue;
+                    }
+
+                    // Add salt to processed salts for this batch
+                    processed_salts.insert(salt_hex.clone());
+
+                    // Add to processed solutions
+                    processed_guard.insert(solution_id);
+                    drop(processed_guard); // Release the lock early
 
                     let mut solution_message = [0; 85];
                     solution_message[0] = CONTROL_CHARACTER;

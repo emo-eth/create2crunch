@@ -7,14 +7,17 @@ use clap::Parser;
 use console::Term;
 use fs4::FileExt;
 #[cfg(feature = "opencl")]
-use ocl::{Buffer, Context, Device, MemFlags, Platform, ProQue, Program, Queue};
+use ocl::{Buffer, Context, Device, Kernel, MemFlags, Platform, ProQue, Program, Queue};
 use rand::{thread_rng, Rng};
 use rayon::prelude::*;
 use separator::Separatable;
+use std::env;
 use std::error::Error;
 use std::fmt::Write as _;
 use std::fs::{File, OpenOptions};
 use std::io::prelude::*;
+use std::io::{self, BufRead};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 use terminal_size::{terminal_size, Height};
 use tiny_keccak::{Hasher, Keccak};
@@ -25,11 +28,14 @@ pub use reward::Reward;
 #[cfg(feature = "metal")]
 pub mod metal_backend;
 
+#[cfg(feature = "metal")]
+pub mod optimize;
+
 #[cfg(test)]
 mod differential_test;
 
-// workset size (tweak this!)
-const WORK_SIZE: u32 = 0x4000000; // max. 0x15400000 to abs. max 0xffffffff
+// Default work size
+pub const WORK_SIZE: u64 = 1048576; // 2^20
 
 const WORK_FACTOR: u128 = (WORK_SIZE as u128) / 1_000_000;
 const CONTROL_CHARACTER: u8 = 0xff;
@@ -101,6 +107,18 @@ pub struct Config {
     /// GPU backend to use - "opencl", "metal", or "auto"
     #[arg(long, default_value = "auto")]
     pub backend: GpuBackend,
+
+    /// Run optimization mode to find optimal parameters (Metal only)
+    #[arg(long)]
+    pub optimize: bool,
+
+    /// Use two-phase optimization strategy (faster but less comprehensive)
+    #[arg(long)]
+    pub two_phase: bool,
+
+    /// Duration in seconds for each benchmark during optimization
+    #[arg(long, default_value = "10")]
+    pub benchmark_duration: u64,
 }
 
 /// Parse an Ethereum address from a hex string
@@ -295,48 +313,70 @@ pub fn cpu(config: Config) -> Result<(), Box<dyn Error>> {
 /// further optimization - contributions are more than welcome!
 /// OpenCL GPU implementation for finding efficient Ethereum addresses
 #[cfg(feature = "opencl")]
-pub fn gpu(config: Config) -> ocl::Result<()> {
+pub fn opencl_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     println!(
         "Setting up experimental OpenCL miner using device {}...",
         config.gpu_device
     );
 
+    // Get the work size from .env if available
+    let work_size = get_work_size();
+    println!("Using work size: {}", work_size);
+
     // (create if necessary) and open a file where found salts will be written
-    let file = output_file();
+    let mut file = output_file();
 
     // create object for computing rewards (relative rarity) for a given address
     let rewards = Reward::new();
 
-    // track how many addresses have been found and information about them
-    let mut found: u64 = 0;
-    let mut found_list: Vec<String> = vec![];
+    // track how many addresses have been found
+    let mut found = 0u64;
 
     // set up a controller for terminal output
     let term = Term::stdout();
 
-    // set up a platform to use
-    let platform = Platform::new(ocl::core::default_platform()?);
+    // Find the specified device
+    let platform_id = 0;
+    let device_id = config.gpu_device as usize;
 
-    // set up the device to use
-    let device = Device::by_idx_wrap(platform, config.gpu_device as usize)?;
+    // Get platforms
+    let platforms = Platform::list();
 
-    // set up the context to use
+    if platforms.is_empty() {
+        return Err("No OpenCL platforms found".into());
+    }
+    let platform = platforms[platform_id];
+
+    // Get devices
+    let devices = match Device::list_all(platform) {
+        Ok(d) => d,
+        Err(e) => return Err(format!("Failed to get OpenCL devices: {}", e).into()),
+    };
+
+    if devices.is_empty() {
+        return Err("No OpenCL devices found".into());
+    }
+    if device_id >= devices.len() {
+        return Err(format!("Device ID {} out of range", device_id).into());
+    }
+    let device = devices[device_id];
+
+    // Create OpenCL context and queue
     let context = Context::builder()
         .platform(platform)
         .devices(device)
         .build()?;
 
-    // set up the program to use
-    let program = Program::builder()
-        .devices(device)
-        .src(mk_kernel_src(&config))
-        .build(&context)?;
-
-    // set up the queue to use
     let queue = Queue::new(&context, device, None)?;
 
-    // set up the "proqueue" (or amalgamation of various elements) to use
-    let ocl_pq = ProQue::new(context, queue, program, Some(WORK_SIZE));
+    // Prepare kernel source
+    let kernel_src = mk_kernel_src(&config);
+
+    // Build program
+    let program = Program::builder()
+        .devices(device)
+        .src(kernel_src)
+        .build(&context)?;
 
     // create a random number generator
     let mut rng = thread_rng();
@@ -347,190 +387,123 @@ pub fn gpu(config: Config) -> ocl::Result<()> {
         .unwrap()
         .as_secs_f64();
 
-    // set up variables for tracking performance
-    let mut rate: f64 = 0.0;
-    let mut cumulative_nonce: u64 = 0;
-
     // the previous timestamp of printing to the terminal
-    let mut previous_time: f64 = 0.0;
+    let mut previous_time = 0.0f64;
 
-    // the last work duration in milliseconds
-    let mut work_duration_millis: u64 = 0;
+    // set up variables for tracking performance
+    let mut rate = 0.0f64;
+    let mut cumulative_nonce = 0u64;
 
     // begin searching for addresses
     loop {
-        // construct the 4-byte message to hash, leaving last 8 of salt empty
+        // construct the 4-byte message to hash
         let salt = FixedBytes::<4>::random();
 
-        // build a corresponding buffer for passing the message to the kernel
-        let message_buffer = Buffer::builder()
-            .queue(ocl_pq.queue().clone())
-            .flags(MemFlags::new().read_only())
+        // Create a fixed-size message buffer (4 bytes) for the kernel
+        let message_buffer = Buffer::<u8>::builder()
+            .queue(queue.clone())
+            .flags(MemFlags::READ_ONLY)
             .len(4)
             .copy_host_slice(&salt[..])
             .build()?;
 
-        // reset nonce & create a buffer to view it in little-endian
-        // for more uniformly distributed nonces, we shall initialize it to a random value
-        let mut nonce: [u32; 1] = rng.gen();
-        let mut view_buf = [0; 8];
-
-        // build a corresponding buffer for passing the nonce to the kernel
-        let mut nonce_buffer = Buffer::builder()
-            .queue(ocl_pq.queue().clone())
-            .flags(MemFlags::new().read_only())
+        // reset nonce & initialize it to a random value for better distribution
+        let nonce: [u32; 1] = rng.gen();
+        let nonce_buffer = Buffer::<u32>::builder()
+            .queue(queue.clone())
+            .flags(MemFlags::READ_ONLY)
             .len(1)
-            .copy_host_slice(&nonce)
+            .copy_host_slice(&nonce[..])
             .build()?;
 
-        // establish a buffer for nonces that result in desired addresses
-        let mut solutions: Vec<u64> = vec![0; 1];
-        let solutions_buffer = Buffer::builder()
-            .queue(ocl_pq.queue().clone())
-            .flags(MemFlags::new().write_only())
+        // Create solutions buffer
+        let solutions_buffer = Buffer::<u64>::builder()
+            .queue(queue.clone())
+            .flags(MemFlags::WRITE_ONLY)
             .len(1)
-            .copy_host_slice(&solutions)
+            .fill_val(0)
             .build()?;
 
-        // repeatedly enqueue kernel to search for new addresses
-        loop {
-            // build the kernel and define the type of each buffer
-            let kern = ocl_pq
-                .kernel_builder("hashMessage")
-                .arg_named("message", None::<&Buffer<u8>>)
-                .arg_named("nonce", None::<&Buffer<u32>>)
-                .arg_named("solutions", None::<&Buffer<u64>>)
-                .build()?;
+        // Create and execute kernel
+        let kernel = ocl::Kernel::builder()
+            .program(&program)
+            .name("hashMessage")
+            .arg(&message_buffer)
+            .arg(&nonce_buffer)
+            .arg(&solutions_buffer)
+            .build()?;
 
-            // set each buffer
-            kern.set_arg("message", Some(&message_buffer))?;
-            kern.set_arg("nonce", Some(&nonce_buffer))?;
-            kern.set_arg("solutions", &solutions_buffer)?;
+        // Run the kernel
+        unsafe {
+            kernel
+                .cmd()
+                .queue(&queue)
+                .global_work_size([work_size])
+                .enq()?;
+        }
 
-            // enqueue the kernel
-            unsafe { kern.enq()? };
+        // read the solution
+        let mut solution = vec![0u64; 1];
+        solutions_buffer.read(&mut solution).enq()?;
 
-            // calculate the current time
-            let mut now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-            let current_time = now.as_secs() as f64;
+        // increment the cumulative nonce
+        cumulative_nonce += 1;
 
-            // we don't want to print too fast
-            let print_output = current_time - previous_time > 0.99;
+        // update rate
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+        let current_time = now.as_secs() as f64;
+        if current_time - start_time > 0.0 {
+            rate = 1.0 / (current_time - start_time);
+        }
+
+        // only print to the terminal if enough time has passed
+        if current_time - previous_time > 0.5 {
             previous_time = current_time;
 
             // clear the terminal screen
-            if print_output {
-                term.clear_screen()?;
+            let _ = term.clear_screen();
 
-                // get the total runtime and parse into hours : minutes : seconds
-                let total_runtime = current_time - start_time;
-                let total_runtime_hrs = total_runtime as u64 / 3600;
-                let total_runtime_mins = (total_runtime as u64 - total_runtime_hrs * 3600) / 60;
-                let total_runtime_secs = total_runtime
-                    - (total_runtime_hrs * 3600) as f64
-                    - (total_runtime_mins * 60) as f64;
+            // get the total runtime and parse into hours : minutes : seconds
+            let total_runtime = current_time - start_time;
+            let total_runtime_hrs = total_runtime as u64 / 3600;
+            let total_runtime_mins = (total_runtime as u64 - total_runtime_hrs * 3600) / 60;
+            let total_runtime_secs = total_runtime
+                - (total_runtime_hrs * 3600) as f64
+                - (total_runtime_mins * 60) as f64;
 
-                // determine the number of attempts being made per second
-                let work_rate: u128 = WORK_FACTOR * cumulative_nonce as u128;
-                if total_runtime > 0.0 {
-                    rate = 1.0 / total_runtime;
-                }
+            // determine the number of attempts being made per second
+            let work_rate: u128 = (work_size as u128) * cumulative_nonce as u128 / 1_000_000;
 
-                // fill the buffer for viewing the properly-formatted nonce
-                LittleEndian::write_u64(&mut view_buf, (nonce[0] as u64) << 32);
+            // display information about the total runtime and work size
+            let _ = term.write_line(&format!(
+                "total runtime: {}:{:02}:{:02} ({} cycles)\t\t\t\
+                 work size per cycle: {}",
+                total_runtime_hrs,
+                total_runtime_mins,
+                total_runtime_secs,
+                cumulative_nonce,
+                work_size.separated_string(),
+            ));
 
-                // calculate the terminal height, defaulting to a height of ten rows
-                let height = terminal_size().map(|(_w, Height(h))| h).unwrap_or(10);
-
-                // display information about the total runtime and work size
-                term.write_line(&format!(
-                    "total runtime: {}:{:02}:{:02} ({} cycles)\t\t\t\
-                     work size per cycle: {}",
-                    total_runtime_hrs,
-                    total_runtime_mins,
-                    total_runtime_secs,
-                    cumulative_nonce,
-                    WORK_SIZE.separated_string(),
-                ))?;
-
-                // display information about the attempt rate and found solutions
-                term.write_line(&format!(
-                    "rate: {:.2} million attempts per second\t\t\t\
-                     total found this run: {}",
-                    work_rate as f64 * rate,
-                    found
-                ))?;
-
-                // display information about the current search criteria
-                term.write_line(&format!(
-                    "current search space: {}xxxxxxxx{:08x}\t\t\
-                     threshold: {} leading or {} total zeroes",
-                    hex::encode(salt),
-                    BigEndian::read_u64(&view_buf),
-                    config.leading_zeroes_threshold,
-                    config.total_zeroes_threshold
-                ))?;
-
-                // display recently found solutions based on terminal height
-                let rows = if height < 5 { 1 } else { height as usize - 4 };
-                let last_rows: Vec<String> = found_list.iter().cloned().rev().take(rows).collect();
-                let ordered: Vec<String> = last_rows.iter().cloned().rev().collect();
-                let recently_found = &ordered.join("\n");
-                term.write_line(recently_found)?;
-            }
-
-            // increment the cumulative nonce (does not reset after a match)
-            cumulative_nonce += 1;
-
-            // record the start time of the work
-            let work_start_time_millis = now.as_secs() * 1000 + now.subsec_nanos() as u64 / 1000000;
-
-            // sleep for 98% of the previous work duration to conserve CPU
-            if work_duration_millis != 0 {
-                std::thread::sleep(std::time::Duration::from_millis(
-                    work_duration_millis * 980 / 1000,
-                ));
-            }
-
-            // read the solutions from the device
-            solutions_buffer.read(&mut solutions).enq()?;
-
-            // record the end time of the work and compute how long the work took
-            now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
-            work_duration_millis = (now.as_secs() * 1000 + now.subsec_nanos() as u64 / 1000000)
-                - work_start_time_millis;
-
-            // if at least one solution is found, end the loop
-            if solutions[0] != 0 {
-                break;
-            }
-
-            // if no solution has yet been found, increment the nonce
-            nonce[0] += 1;
-
-            // update the nonce buffer with the incremented nonce value
-            nonce_buffer = Buffer::builder()
-                .queue(ocl_pq.queue().clone())
-                .flags(MemFlags::new().read_write())
-                .len(1)
-                .copy_host_slice(&nonce)
-                .build()?;
+            // display information about the attempt rate and found solutions
+            let _ = term.write_line(&format!(
+                "rate: {:.2} million attempts per second\t\t\t\
+                 total found this run: {}",
+                work_rate as f64 * rate,
+                found
+            ));
         }
 
-        // iterate over each solution, first converting to a fixed array
-        for &solution in &solutions {
-            if solution == 0 {
-                continue;
-            }
-
-            let solution = solution.to_le_bytes();
+        // check if a solution was found
+        if solution[0] != 0 {
+            let solution_bytes = solution[0].to_le_bytes();
 
             let mut solution_message = [0; 85];
             solution_message[0] = CONTROL_CHARACTER;
             solution_message[1..21].copy_from_slice(&config.factory_address);
             solution_message[21..41].copy_from_slice(&config.calling_address);
             solution_message[41..45].copy_from_slice(&salt[..]);
-            solution_message[45..53].copy_from_slice(&solution);
+            solution_message[45..53].copy_from_slice(&solution_bytes);
             solution_message[53..].copy_from_slice(&config.init_code_hash);
 
             // create new hash object
@@ -562,21 +535,22 @@ pub fn gpu(config: Config) -> ocl::Result<()> {
             let reward = rewards.get(&key).unwrap_or("0");
             let output = format!(
                 "0x{}{}{} => {} => {}",
-                hex::encode(config.calling_address),
+                hex::encode(&config.calling_address),
                 hex::encode(salt),
-                hex::encode(solution),
+                hex::encode(solution_bytes),
                 address,
                 reward,
             );
 
-            let show = format!("{output} ({leading} / {total})");
-            found_list.push(show.to_string());
+            // display the solution
+            let _ = term.write_line(&format!("{output} ({leading} / {total})"));
 
-            file.lock_exclusive().expect("Couldn't lock file.");
+            // write the solution to the file
+            if let Err(e) = writeln!(&mut file, "{}", output) {
+                eprintln!("Error writing to file: {}", e);
+            }
 
-            writeln!(&file, "{output}").expect("Couldn't write to `efficient_addresses.txt` file.");
-
-            FileExt::unlock(&file).expect("Couldn't unlock file.");
+            // increment the found counter
             found += 1;
         }
     }
@@ -612,4 +586,42 @@ pub fn mk_kernel_src(config: &Config) -> String {
     src.push_str(KERNEL_SRC);
 
     src
+}
+
+// Function to get the work size, either from .env or the default
+pub fn get_work_size() -> u64 {
+    if let Ok(lines) = read_lines(".env") {
+        for line in lines.flatten() {
+            if line.starts_with('#') || line.trim().is_empty() {
+                continue;
+            }
+
+            let parts: Vec<&str> = line.split('=').collect();
+            if parts.len() != 2 {
+                continue;
+            }
+
+            let key = parts[0].trim();
+            let value = parts[1].trim();
+
+            if key == "OPTIMAL_WORK_SIZE" {
+                if let Ok(size) = value.parse::<u64>() {
+                    println!("Using optimal work size from .env: {}", size);
+                    return size;
+                }
+            }
+        }
+    }
+
+    // Return the default if no .env file or no valid work size found
+    WORK_SIZE
+}
+
+// Helper function to read lines from a file
+fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
+where
+    P: AsRef<Path>,
+{
+    let file = File::open(filename)?;
+    Ok(io::BufReader::new(file).lines())
 }
