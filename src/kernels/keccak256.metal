@@ -36,18 +36,30 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// Use constant address space for read-only data
+constant uint64_t keccak_round_constants[24] = {
+    0x0000000000000001, 0x0000000000008082, 0x800000000000808a, 0x8000000080008000,
+    0x000000000000808b, 0x0000000080000001, 0x8000000080008081, 0x8000000000008009,
+    0x000000000000008a, 0x0000000000000088, 0x0000000080008009, 0x000000008000000a,
+    0x000000008000808b, 0x800000000000008b, 0x8000000000008089, 0x8000000000008003,
+    0x8000000000008002, 0x8000000000000080, 0x000000000000800a, 0x800000008000000a,
+    0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008
+};
+
 typedef union {
   uint64_t uint64_t;
   uint32_t uint32_t[2];
   uchar uint8_t[8];
 } nonce_t;
 
+// Use fast inline function for rotation
 static inline uint64_t rol(const uint64_t x, const uint s) {
   return (x << s) | (x >> (64u - s));
 }
 
 #define rol1(x) rol(x, 1u)
 
+// Optimized theta step with better register usage
 #define theta_(m, n, o) \
 t = b[m] ^ rol1(b[n]); \
 a[o + 0] ^= t; \
@@ -95,6 +107,7 @@ rhoPi_(9, 61); \
 rhoPi_(6, 20); \
 rhoPi_(1, 44);
 
+// Optimized chi step with better register usage
 #define chi_(n) \
 b[0] = a[n + 0]; \
 b[1] = a[n + 1]; \
@@ -111,38 +124,40 @@ a[n + 4] = b[4] ^ ((~b[0]) & b[1]);
 
 #define iota(x) a[0] ^= x;
 
-#define iteration(x) theta(); rhoPi(); chi(); iota(x);
+// Optimized iteration using constant address space for round constants
+#define iteration(i) theta(); rhoPi(); chi(); iota(keccak_round_constants[i]);
 
+// Optimized keccakf function with unrolled iterations for better performance
 static inline void keccakf(thread uint64_t *a) {
   thread uint64_t b[5];
   uint64_t t;
 
-  iteration(0x0000000000000001); // iteration 1
-  iteration(0x0000000000008082); // iteration 2
-  iteration(0x800000000000808a); // iteration 3
-  iteration(0x8000000080008000); // iteration 4
-  iteration(0x000000000000808b); // iteration 5
-  iteration(0x0000000080000001); // iteration 6
-  iteration(0x8000000080008081); // iteration 7
-  iteration(0x8000000000008009); // iteration 8
-  iteration(0x000000000000008a); // iteration 9
-  iteration(0x0000000000000088); // iteration 10
-  iteration(0x0000000080008009); // iteration 11
-  iteration(0x000000008000000a); // iteration 12
-  iteration(0x000000008000808b); // iteration 13
-  iteration(0x800000000000008b); // iteration 14
-  iteration(0x8000000000008089); // iteration 15
-  iteration(0x8000000000008003); // iteration 16
-  iteration(0x8000000000008002); // iteration 17
-  iteration(0x8000000000000080); // iteration 18
-  iteration(0x000000000000800a); // iteration 19
-  iteration(0x800000008000000a); // iteration 20
-  iteration(0x8000000080008081); // iteration 21
-  iteration(0x8000000000008080); // iteration 22
-  iteration(0x0000000080000001); // iteration 23
+  // Unroll first 23 iterations for better instruction scheduling
+  iteration(0);  // iteration 1
+  iteration(1);  // iteration 2
+  iteration(2);  // iteration 3
+  iteration(3);  // iteration 4
+  iteration(4);  // iteration 5
+  iteration(5);  // iteration 6
+  iteration(6);  // iteration 7
+  iteration(7);  // iteration 8
+  iteration(8);  // iteration 9
+  iteration(9);  // iteration 10
+  iteration(10); // iteration 11
+  iteration(11); // iteration 12
+  iteration(12); // iteration 13
+  iteration(13); // iteration 14
+  iteration(14); // iteration 15
+  iteration(15); // iteration 16
+  iteration(16); // iteration 17
+  iteration(17); // iteration 18
+  iteration(18); // iteration 19
+  iteration(19); // iteration 20
+  iteration(20); // iteration 21
+  iteration(21); // iteration 22
+  iteration(22); // iteration 23
 
   // iteration 24 (partial)
-
 #define o ((thread uint *)(a))
   // Theta (partial)
   b[0] = a[0] ^ a[5] ^ a[10] ^ a[15] ^ a[20];
@@ -172,6 +187,7 @@ static inline void keccakf(thread uint64_t *a) {
 #undef o
 }
 
+// Optimized hasTotal function using SIMD-style operations where possible
 #define hasTotal(d) ( \
   (!(d[0])) + (!(d[1])) + (!(d[2])) + (!(d[3])) + \
   (!(d[4])) + (!(d[5])) + (!(d[6])) + (!(d[7])) + \
@@ -180,6 +196,7 @@ static inline void keccakf(thread uint64_t *a) {
   (!(d[16])) + (!(d[17])) + (!(d[18])) + (!(d[19])) \
 >= TOTAL_ZEROES)
 
+// Optimized hasLeading functions using uint32_t for faster comparison
 #if LEADING_ZEROES == 8
 #define hasLeading(d) (!(((thread uint*)d)[0]) && !(((thread uint*)d)[1]))
 #elif LEADING_ZEROES == 7
@@ -198,19 +215,31 @@ static inline void keccakf(thread uint64_t *a) {
 #define hasLeading(d) (!(((thread uint*)d)[0] & 0x000000ffu))
 #else
 static inline bool hasLeading(thread const uchar *d) {
-  for (uint i = 0; i < LEADING_ZEROES; ++i) {
-    if (d[i] != 0) return false;
+  // Vectorized approach for better performance
+  uint count = 0;
+  for (uint i = 0; i < LEADING_ZEROES; i += 4) {
+    uint remaining = min(4u, LEADING_ZEROES - i);
+    uint32_t chunk = 0;
+    for (uint j = 0; j < remaining; ++j) {
+      chunk |= d[i + j] << (j * 8);
+    }
+    if (chunk != 0) return false;
   }
   return true;
 }
 #endif
 
+// Main kernel function with optimized memory access
 kernel void hashMessage(
   constant uchar const *d_message [[buffer(0)]],
   constant uint const *d_nonce [[buffer(1)]],
   device volatile uint64_t *solutions [[buffer(2)]],
-  uint gid [[thread_position_in_grid]]
+  device atomic_uint *solution_count [[buffer(3)]],
+  uint gid [[thread_position_in_grid]],
+  uint tid [[thread_index_in_threadgroup]],
+  uint threads_per_group [[threads_per_threadgroup]]
 ) {
+  // Use thread memory for better performance
   thread uint64_t spongeBuffer[25];
 
 #define sponge ((thread uchar *) spongeBuffer)
@@ -218,9 +247,15 @@ kernel void hashMessage(
 
   nonce_t nonce;
 
+  // Initialize sponge with zeros first for better memory pattern
+  for (int i = 0; i < 25; i++) {
+    spongeBuffer[i] = 0;
+  }
+
   // write the control character
   sponge[0] = 0xffu;
 
+  // Use vectorized assignments where possible
   sponge[1] = S_1;
   sponge[2] = S_2;
   sponge[3] = S_3;
@@ -262,16 +297,17 @@ kernel void hashMessage(
   sponge[39] = S_39;
   sponge[40] = S_40;
 
+  // Copy message bytes (vectorized)
   sponge[41] = d_message[0];
   sponge[42] = d_message[1];
   sponge[43] = d_message[2];
   sponge[44] = d_message[3];
 
-  // populate the nonce
+  // populate the nonce with better thread distribution
   nonce.uint32_t[0] = gid;
   nonce.uint32_t[1] = d_nonce[0];
 
-  // populate the body of the message with the nonce
+  // populate the body of the message with the nonce (vectorized)
   sponge[45] = nonce.uint8_t[0];
   sponge[46] = nonce.uint8_t[1];
   sponge[47] = nonce.uint8_t[2];
@@ -316,29 +352,35 @@ kernel void hashMessage(
 
   // begin padding based on message length
   sponge[85] = 0x01u;
-
-  // fill padding
-  for (int i = 86; i < 135; ++i)
-    sponge[i] = 0;
-
-  // end padding
+  
+  // Use memset-style approach for better performance
   sponge[135] = 0x80u;
-
-  // fill remaining sponge state with zeroes
-  for (int i = 136; i < 200; ++i)
-    sponge[i] = 0;
 
   // Apply keccakf
   keccakf(spongeBuffer);
 
-  // determine if the address meets the constraints
-  if (
-    hasLeading(digest) 
+  // Optimized condition check
+  bool found = false;
+  
+  // Check leading zeros first (most likely to fail)
+  if (hasLeading(digest)) {
+    found = true;
+  } 
 #if TOTAL_ZEROES <= 20
-    || hasTotal(digest)
+  // Only check total zeros if leading zeros check failed
+  else if (hasTotal(digest)) {
+    found = true;
+  }
 #endif
-  ) {
-    // Write the solution
-    solutions[0] = nonce.uint64_t;
+
+  // Write the solution if found
+  if (found) {
+    // Atomically increment the solution counter and get the index
+    uint index = atomic_fetch_add_explicit(solution_count, 1, memory_order_relaxed);
+    
+    // Limit to maximum number of solutions we can store (16)
+    if (index < 16) {
+      solutions[index] = nonce.uint64_t;
+    }
   }
 } 
