@@ -371,7 +371,11 @@ pub fn grid_search(config: &Config, duration_seconds: u64) -> Result<(), Box<dyn
         default_work_size,
         default_work_size * 2,
         default_work_size * 4,
-    ];
+    ]
+    .iter()
+    .filter(|&&size| size <= 2147483648)
+    .copied()
+    .collect::<Vec<u64>>();
     let threadgroup_sizes = [32, 64, 128, 256, 512, 1024];
 
     // Track best configuration
@@ -498,9 +502,12 @@ pub fn two_phase_optimization(config: &Config) -> Result<(), Box<dyn Error>> {
         default_work_size * 8,
         default_work_size * 16,
         default_work_size * 32,
-    ];
+    ]
+    .iter()
+    .filter(|&size| size <= &2147483648)
+    .copied()
+    .collect::<Vec<u64>>();
     let threadgroup_sizes = [64, 256, 1024];
-    let parallel_buffers = [1, 4, 8, 16, 32, 64, 128];
 
     let mut best_work_size = 0;
     let mut best_threadgroup_size = 0;
@@ -509,26 +516,24 @@ pub fn two_phase_optimization(config: &Config) -> Result<(), Box<dyn Error>> {
     // Coarse grid search
     for &work_size in &work_sizes {
         for &threadgroup_size in &threadgroup_sizes {
-            for &buffer_count in &parallel_buffers {
-                match benchmark_configuration(
-                    config,
-                    work_size,
-                    threadgroup_size,
-                    1, // shorter duration for phase 1
-                ) {
-                    Ok(result) => {
-                        if result.hash_rate > best_hash_rate {
-                            best_hash_rate = result.hash_rate;
-                            best_work_size = work_size;
-                            best_threadgroup_size = threadgroup_size;
-                        }
+            match benchmark_configuration(
+                config,
+                work_size,
+                threadgroup_size,
+                1, // shorter duration for phase 1
+            ) {
+                Ok(result) => {
+                    if result.hash_rate > best_hash_rate {
+                        best_hash_rate = result.hash_rate;
+                        best_work_size = work_size;
+                        best_threadgroup_size = threadgroup_size;
                     }
-                    Err(e) => {
-                        println!(
-                            "Error in phase 1 (work_size={}, threadgroup={}, buffers={}): {}",
-                            work_size, threadgroup_size, buffer_count, e
-                        );
-                    }
+                }
+                Err(e) => {
+                    println!(
+                        "Error in phase 1 (work_size={}, threadgroup={}): {}",
+                        work_size, threadgroup_size, e
+                    );
                 }
             }
         }
@@ -549,7 +554,11 @@ pub fn two_phase_optimization(config: &Config) -> Result<(), Box<dyn Error>> {
         best_work_size / work_size_factor,
         best_work_size,
         best_work_size * work_size_factor,
-    ];
+    ]
+    .iter()
+    .filter(|&size| size <= &2147483648)
+    .copied()
+    .collect::<Vec<u64>>();
 
     let threadgroup_factor = 2;
     let fine_threadgroup_sizes = [
