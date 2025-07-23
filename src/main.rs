@@ -24,12 +24,16 @@ struct Args {
     gpu_device: u32,
 
     /// Minimum number of leading zero bytes required
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = 3)]
     leading_zeroes: u8,
 
     /// Minimum number of total zero bytes required
-    #[arg(long, default_value_t = 2)]
+    #[arg(long, default_value_t = 5)]
     total_zeroes: u8,
+
+    /// Minimum score threshold for addresses (higher = more rare)
+    #[arg(long, default_value_t = 132)]
+    minimum_score: u64,
 
     /// GPU backend to use (opencl, metal, or metal2)
     #[arg(long, default_value = "opencl")]
@@ -77,6 +81,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         gpu_device: args.gpu_device as u8,
         leading_zeroes_threshold: args.leading_zeroes,
         total_zeroes_threshold: args.total_zeroes,
+        minimum_score: args.minimum_score,
         backend,
         optimize: args.optimize,
         two_phase: args.two_phase,

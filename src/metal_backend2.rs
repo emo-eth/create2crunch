@@ -1,4 +1,6 @@
-use crate::{Config, Reward, CONTROL_CHARACTER};
+use crate::{
+    calculate_address_metrics, Config, LeadingNibbleReward, RewardTrait, CONTROL_CHARACTER,
+};
 use alloy_primitives::{hex, Address, FixedBytes};
 use console::Term;
 use metal::*;
@@ -368,7 +370,7 @@ fn process_solutions(
     buffers: &BufferSet,
     salt: &FixedBytes<4>,
     config: &Config,
-    rewards: &Arc<Reward>,
+    rewards: &Arc<LeadingNibbleReward>,
     state: &MiningState,
 ) {
     // Check for solutions
@@ -434,41 +436,25 @@ fn process_solutions(
             // get the address that results from the hash
             let address = <&Address>::try_from(&res[12..]).unwrap();
 
-            // Count zero bytes in the address (20 bytes)
-            let mut total_zeroes = 0;
-            let mut leading_zeroes = 0;
-            let mut still_leading = true;
+            // calculate address metrics using helper function
+            let (leading_bytes, leading_nibbles, total_zeroes) = calculate_address_metrics(address);
 
-            for &byte in address.iter() {
-                if byte == 0 {
-                    total_zeroes += 1;
-                    if still_leading {
-                        leading_zeroes += 1;
-                    }
-                } else {
-                    still_leading = false;
-                }
-            }
+            // Calculate the reward score for this address using pre-calculated values
+            let reward_score =
+                rewards.get_from_counts(leading_bytes, leading_nibbles, total_zeroes);
 
-            // Verify this is actually a solution according to our criteria
-            let meets_leading_criteria = leading_zeroes >= config.leading_zeroes_threshold as usize;
-            let meets_total_criteria = total_zeroes >= config.total_zeroes_threshold as usize;
-
-            // Only process if it meets either criteria
-            if meets_leading_criteria || meets_total_criteria {
-                // Use the correct leading count for key and display
-                let key = leading_zeroes * 20 + total_zeroes;
-                let reward = rewards.get(&key).unwrap_or("0");
+            // Only process if the score meets the minimum threshold
+            if reward_score >= config.minimum_score {
                 let output = format!(
                     "0x{}{}{} => {} => {}",
                     hex::encode(config.calling_address),
                     hex::encode(salt),
                     hex::encode(solution_bytes),
                     address,
-                    reward,
+                    reward_score,
                 );
 
-                let show = format!("{output} ({leading_zeroes} / {total_zeroes})");
+                let show = format!("{output} ({leading_bytes}/{total_zeroes})");
 
                 // Update found count and list
                 {
@@ -524,6 +510,7 @@ fn spawn_ui_thread(
     // Copy config values needed for display
     let leading_zeroes_threshold = config.leading_zeroes_threshold;
     let total_zeroes_threshold = config.total_zeroes_threshold;
+    let minimum_score = config.minimum_score;
 
     thread::spawn(move || {
         loop {
@@ -585,8 +572,8 @@ fn spawn_ui_thread(
             // display information about the optimized search strategy
             let _ = term_clone.write_line(&format!(
                 "[Metal2] search strategy: 4-byte salt (random) | 4-byte sequential nonce\t\t\
-                 threadgroup size: {}, threshold: {} leading or {} total zeroes",
-                threadgroup_size, leading_zeroes_threshold, total_zeroes_threshold
+                 threadgroup size: {}, threshold: {} leading or {} total zeroes (min score: {})",
+                threadgroup_size, leading_zeroes_threshold, total_zeroes_threshold, minimum_score
             ));
 
             // display recently found solutions based on terminal height
@@ -666,7 +653,7 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     let state = MiningState::new();
 
     // Create object for computing rewards (relative rarity) for a given address
-    let rewards = Arc::new(Reward::new());
+    let rewards = Arc::new(LeadingNibbleReward::default());
 
     // Set up a controller for terminal output
     let term = Arc::new(Term::stdout());

@@ -1,4 +1,4 @@
-use crate::{Config, Reward, CONTROL_CHARACTER};
+use crate::{Config, LeadingNibbleReward, RewardTrait, CONTROL_CHARACTER};
 use alloy_primitives::{hex, Address, FixedBytes};
 use console::Term;
 use metal::*;
@@ -30,7 +30,7 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     let file = Arc::new(crate::output_file());
 
     // create object for computing rewards (relative rarity) for a given address
-    let rewards = Arc::new(Reward::new());
+    let rewards = Arc::new(LeadingNibbleReward::default());
 
     // track how many addresses have been found and information about them
     let found = Arc::new(Mutex::new(0u64));

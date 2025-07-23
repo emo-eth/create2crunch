@@ -20,7 +20,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tiny_keccak::{Hasher, Keccak};
 
 mod reward;
-pub use reward::Reward;
+pub use reward::{LeadingNibbleReward, RewardTrait};
 
 // #[cfg(feature = "metal")]
 // mod metal;
@@ -114,6 +114,10 @@ pub struct Config {
     /// Minimum number of total zero bytes to search for
     #[arg(long, default_value = "5", value_parser = parse_total_zeroes)]
     pub total_zeroes_threshold: u8,
+
+    /// Minimum score threshold for addresses (higher = more rare)
+    #[arg(long, default_value = "1000")]
+    pub minimum_score: u64,
 
     /// GPU backend to use - "opencl", "metal", or "auto"
     #[arg(long, default_value = "auto")]
@@ -212,7 +216,7 @@ pub fn cpu(config: Config) -> Result<(), Box<dyn Error>> {
     let file = output_file();
 
     // create object for computing rewards (relative rarity) for a given address
-    let rewards = Reward::new();
+    let rewards = LeadingNibbleReward::default();
 
     // begin searching for addresses
     loop {
@@ -250,29 +254,16 @@ pub fn cpu(config: Config) -> Result<(), Box<dyn Error>> {
                 // get the address that results from the hash
                 let address = <&Address>::try_from(&res[12..]).unwrap();
 
-                // count total and leading zero bytes
-                let mut total = 0;
-                let mut leading = 21;
-                for (i, &b) in address.iter().enumerate() {
-                    if b == 0 {
-                        total += 1;
-                    } else if leading == 21 {
-                        // set leading on finding non-zero byte
-                        leading = i;
-                    }
-                }
+                // calculate address metrics using helper function
+                let (leading_bytes, leading_nibbles, total_zeroes) =
+                    calculate_address_metrics(address);
 
-                // only proceed if there are at least three zero bytes
-                if total < 3 {
-                    return;
-                }
+                // calculate the reward score for this address using pre-calculated values
+                let reward_score =
+                    rewards.get_from_counts(leading_bytes, leading_nibbles, total_zeroes);
 
-                // look up the reward amount
-                let key = leading * 20 + total;
-                let reward_amount = rewards.get(&key);
-
-                // only proceed if an efficient address has been found
-                if reward_amount.is_none() {
+                // only proceed if the score meets the minimum threshold
+                if reward_score < config.minimum_score {
                     return;
                 }
 
@@ -282,10 +273,7 @@ pub fn cpu(config: Config) -> Result<(), Box<dyn Error>> {
                 let full_salt = format!("0x{}{}", &header_hex_string[42..], &body_hex_string);
 
                 // display the salt and the address.
-                let output = format!(
-                    "{full_salt} => {address} => {}",
-                    reward_amount.unwrap_or("0")
-                );
+                let output = format!("{full_salt} => {address} => {}", reward_score);
                 println!("{output}");
 
                 // create a lock on the file before writing
@@ -338,7 +326,7 @@ pub fn opencl_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     let mut file = output_file();
 
     // create object for computing rewards (relative rarity) for a given address
-    let rewards = Reward::new();
+    let rewards = LeadingNibbleReward::default();
 
     // track how many addresses have been found
     let mut found = 0u64;
@@ -530,31 +518,23 @@ pub fn opencl_gpu(config: Config) -> Result<(), Box<dyn Error>> {
             // get the address that results from the hash
             let address = <&Address>::try_from(&res[12..]).unwrap();
 
-            // count total and leading zero bytes
-            let mut total = 0;
-            let mut leading = 0;
-            for (i, &b) in address.iter().enumerate() {
-                if b == 0 {
-                    total += 1;
-                } else if leading == 0 {
-                    // set leading on finding non-zero byte
-                    leading = i;
-                }
-            }
+            // calculate address metrics using helper function
+            let (leading_bytes, leading_nibbles, total_zeroes) = calculate_address_metrics(address);
 
-            let key = leading * 20 + total;
-            let reward = rewards.get(&key).unwrap_or("0");
+            // calculate the reward score for this address using pre-calculated values
+            let reward_score =
+                rewards.get_from_counts(leading_bytes, leading_nibbles, total_zeroes);
             let output = format!(
                 "0x{}{}{} => {} => {}",
                 hex::encode(config.calling_address),
                 hex::encode(salt),
                 hex::encode(solution_bytes),
                 address,
-                reward,
+                reward_score,
             );
 
             // display the solution
-            let _ = term.write_line(&format!("{output} ({leading} / {total})"));
+            let _ = term.write_line(&format!("{output}"));
 
             // write the solution to the file
             if let Err(e) = writeln!(&mut file, "{}", output) {
@@ -655,6 +635,33 @@ pub fn get_optimal_threadgroup_size() -> u64 {
 
     // Return the default if no .env file or no valid threadgroup size found
     256
+}
+
+/// Helper function to calculate leading bytes, leading nibbles, and total zeroes for an address
+pub fn calculate_address_metrics(addr: &Address) -> (u64, u64, u64) {
+    let mut leading_zero_bytes: u64 = 0;
+    let mut still_leading = true;
+    let mut leading_zero_nibbles: u64 = 0;
+    let mut total_zeroes = 0;
+
+    for &byte in addr.iter() {
+        if byte == 0 {
+            total_zeroes += 1;
+            if still_leading {
+                leading_zero_bytes += 1;
+                leading_zero_nibbles += 2;
+            }
+        } else {
+            if still_leading {
+                if byte < 16 {
+                    leading_zero_nibbles += 1;
+                }
+                still_leading = false;
+            }
+        }
+    }
+
+    (leading_zero_bytes, leading_zero_nibbles, total_zeroes)
 }
 
 // Helper function to read lines from a file

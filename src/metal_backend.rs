@@ -1,4 +1,6 @@
-use crate::{Config, Reward, CONTROL_CHARACTER};
+use crate::{
+    calculate_address_metrics, Config, LeadingNibbleReward, RewardTrait, CONTROL_CHARACTER,
+};
 use alloy_primitives::{hex, Address, FixedBytes};
 use console::Term;
 use metal::*;
@@ -108,7 +110,7 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     Arc::new(crate::output_file());
 
     // create object for computing rewards (relative rarity) for a given address
-    let rewards = Arc::new(Reward::new());
+    let rewards = Arc::new(LeadingNibbleReward::default());
 
     // track how many addresses have been found and information about them
     let found = Arc::new(Mutex::new(0u64));
@@ -244,6 +246,7 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
     let init_code_hash = config.init_code_hash;
     let leading_zeroes_threshold = config.leading_zeroes_threshold;
     let total_zeroes_threshold = config.total_zeroes_threshold;
+    let minimum_score = config.minimum_score;
     let processed_solutions_clone = processed_solutions.clone();
 
     let term_clone = term.clone();
@@ -313,9 +316,8 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
             // display information about the optimized search strategy
             let _ = term_clone.write_line(&format!(
                 "search strategy: 4-byte salt (buffer_id + random) | 8-byte nonce (hierarchical_thread_id + counter_nonce)\t\t\
-                 threshold: {} leading or {} total zeroes",
-                leading_zeroes_threshold,
-                total_zeroes_threshold
+                 threshold: {} leading or {} total zeroes (min score: {})",
+                leading_zeroes_threshold, total_zeroes_threshold, minimum_score
             ));
 
             // display recently found solutions based on terminal height
@@ -510,43 +512,26 @@ pub fn metal_gpu(config: Config) -> Result<(), Box<dyn Error>> {
                 // get the address that results from the hash
                 let address = <&Address>::try_from(&res[12..]).unwrap();
 
-                // Count zero bytes in the address (20 bytes)
-                // This needs to match the Metal kernel's logic
-                let mut total_zeroes = 0;
-                let mut leading_zeroes = 0;
-                let mut still_leading = true;
+                // calculate address metrics using helper function
+                let (leading_bytes, leading_nibbles, total_zeroes) =
+                    calculate_address_metrics(address);
 
-                for &byte in address.iter() {
-                    if byte == 0 {
-                        total_zeroes += 1;
-                        if still_leading {
-                            leading_zeroes += 1;
-                        }
-                    } else {
-                        still_leading = false;
-                    }
-                }
+                // Calculate the reward score for this address using pre-calculated values
+                let reward_score =
+                    rewards.get_from_counts(leading_bytes, leading_nibbles, total_zeroes);
 
-                // Verify this is actually a solution according to our criteria
-                let meets_leading_criteria =
-                    leading_zeroes >= config.leading_zeroes_threshold as usize;
-                let meets_total_criteria = total_zeroes >= config.total_zeroes_threshold as usize;
-
-                // Only process if it meets either criteria
-                if meets_leading_criteria || meets_total_criteria {
-                    // Use the correct leading count for key and display
-                    let key = leading_zeroes * 20 + total_zeroes;
-                    let reward = rewards.get(&key).unwrap_or("0");
+                // Only process if the score meets the minimum threshold
+                if reward_score >= config.minimum_score {
                     let output = format!(
                         "0x{}{}{} => {} => {}",
                         hex::encode(config.calling_address),
                         hex::encode(salt),
                         hex::encode(solution_bytes),
                         address,
-                        reward,
+                        reward_score,
                     );
 
-                    let show = format!("{output} ({leading_zeroes} / {total_zeroes})");
+                    let show = format!("{output} ({leading_bytes}/{total_zeroes})");
 
                     // Update found count and list
                     {

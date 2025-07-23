@@ -1,4 +1,6 @@
-use crate::{Config, Reward, CONTROL_CHARACTER};
+use crate::{
+    calculate_address_metrics, Config, LeadingNibbleReward, RewardTrait, CONTROL_CHARACTER,
+};
 use alloy_primitives::{hex, Address};
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -9,7 +11,7 @@ use tiny_keccak::{Hasher, Keccak};
 
 pub(super) struct SolutionProcessor {
     config: Config,
-    rewards: Arc<Reward>,
+    rewards: Arc<LeadingNibbleReward>,
     found: Arc<Mutex<u64>>,
     found_list: Arc<Mutex<Vec<String>>>,
     processed_solutions: Arc<Mutex<HashSet<String>>>,
@@ -18,7 +20,7 @@ pub(super) struct SolutionProcessor {
 impl SolutionProcessor {
     pub(super) fn new(
         config: Config,
-        rewards: Arc<Reward>,
+        rewards: Arc<LeadingNibbleReward>,
         found: Arc<Mutex<u64>>,
         found_list: Arc<Mutex<Vec<String>>>,
     ) -> Self {
@@ -84,50 +86,16 @@ impl SolutionProcessor {
         // get the address that results from the hash
         let address = <&Address>::try_from(&res[12..]).unwrap();
 
-        // Count zero bytes in the address (20 bytes)
-        let mut total_zeroes = 0;
-        let mut leading_zeroes = 0;
-        let mut still_leading = true;
+        // calculate address metrics using helper function
+        let (leading_bytes, leading_nibbles, total_zeroes) = calculate_address_metrics(address);
 
-        for &byte in address.iter() {
-            if byte == 0 {
-                total_zeroes += 1;
-                if still_leading {
-                    leading_zeroes += 1;
-                }
-            } else {
-                still_leading = false;
-            }
-        }
+        // Calculate the reward score for this address using pre-calculated values
+        let reward_score =
+            self.rewards
+                .get_from_counts(leading_bytes, leading_nibbles, total_zeroes);
 
-        // Print detailed information about the address
-        println!("DEBUG: Generated address: {}", address);
-        println!("DEBUG: Address bytes: {}", hex::encode(address.as_slice()));
-        println!(
-            "DEBUG: Zeroes: Leading={}, Total={}",
-            leading_zeroes, total_zeroes
-        );
-        println!(
-            "DEBUG: Thresholds: Leading={}, Total={}",
-            self.config.leading_zeroes_threshold, self.config.total_zeroes_threshold
-        );
-
-        // Verify this is actually a solution according to our criteria
-        let meets_leading_criteria =
-            leading_zeroes >= self.config.leading_zeroes_threshold as usize;
-        let meets_total_criteria = total_zeroes >= self.config.total_zeroes_threshold as usize;
-
-        println!(
-            "DEBUG: Meets criteria: Leading={}, Total={}",
-            meets_leading_criteria, meets_total_criteria
-        );
-
-        // Only process if it meets either criteria
-        if meets_leading_criteria || meets_total_criteria {
-            // Use the correct leading count for key and display
-            let key = leading_zeroes * 20 + total_zeroes;
-            let reward = self.rewards.get(&key).unwrap_or("0");
-
+        // Only process if the score meets the minimum threshold
+        if reward_score >= self.config.minimum_score {
             // Extract buffer index from the first byte of the salt
             let buffer_idx = salt[0];
 
@@ -137,11 +105,11 @@ impl SolutionProcessor {
                 hex::encode(salt),
                 hex::encode(solution_bytes),
                 address,
-                reward,
+                reward_score,
                 buffer_idx,
             );
 
-            let show = format!("{output} ({leading_zeroes} / {total_zeroes})");
+            let show = format!("{output} ({leading_bytes}/{total_zeroes})");
 
             println!("FOUND SOLUTION: {}", show);
 

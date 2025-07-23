@@ -60,10 +60,11 @@ The program requires the following arguments:
 1. `factory_address`: The address of the contract that will call CREATE2 (hex without 0x prefix)
 2. `calling_address`: The address of the caller of the factory contract (hex without 0x prefix)
 3. `init_code_hash`: The keccak-256 hash of the bytecode that will be used to initialize the new contract (hex without 0x prefix)
-4. `gpu_device` (optional): The GPU device ID to use (default: 255, which uses CPU)
-5. `leading_zeroes_threshold` (optional): Minimum number of leading zero bytes to search for (default: 3)
-6. `total_zeroes_threshold` (optional): Minimum number of total zero bytes to search for (default: 5)
-7. `backend` (optional): GPU backend to use - "opencl", "metal", or "auto" (default: "auto")
+4. `gpu_device` (optional): The GPU device ID to use (default: 0)
+5. `leading_zeroes` (optional): Minimum number of leading zero bytes for GPU filtering (default: 3)
+6. `total_zeroes` (optional): Minimum number of total zero bytes for GPU filtering (default: 5)
+7. `minimum_score` (optional): Minimum reward score for CPU filtering (default: 1000)
+8. `backend` (optional): GPU backend to use - "opencl", "metal", or "metal2" (default: "opencl")
 
 ### Useful variables
 
@@ -83,19 +84,19 @@ cargo run --release -- --factory-address <factory_address> --calling-address <ca
 #### Using OpenCL GPU
 
 ```sh
-cargo run --release --features opencl -- --factory-address <factory_address> --calling-address <calling_address> --init-code-hash <init_code_hash> --gpu-device <gpu_device> --leading-zeroes-threshold <leading_zeroes> --total-zeroes-threshold <total_zeroes> --backend opencl
+cargo run --release --features opencl -- --factory-address <factory_address> --calling-address <calling_address> --init-code-hash <init_code_hash> --gpu-device <gpu_device> --leading-zeroes <leading_zeroes> --total-zeroes <total_zeroes> --minimum-score <minimum_score> --backend opencl
 ```
 
 #### Using Metal GPU (macOS only)
 
 ```sh
-cargo run --release --features metal -- --factory-address <factory_address> --calling-address <calling_address> --init-code-hash <init_code_hash> --gpu-device <gpu_device> --leading-zeroes-threshold <leading_zeroes> --total-zeroes-threshold <total_zeroes> --backend metal
+cargo run --release --features metal -- --factory-address <factory_address> --calling-address <calling_address> --init-code-hash <init_code_hash> --gpu-device <gpu_device> --leading-zeroes <leading_zeroes> --total-zeroes <total_zeroes> --minimum-score <minimum_score> --backend metal
 ```
 
-#### Auto-detect Best Backend
+#### Using Metal2 GPU (macOS only)
 
 ```sh
-cargo run --release --features "opencl metal" -- --factory-address <factory_address> --calling-address <calling_address> --init-code-hash <init_code_hash> --gpu-device <gpu_device> --leading-zeroes-threshold <leading_zeroes> --total-zeroes-threshold <total_zeroes> --backend auto
+cargo run --release --features metal -- --factory-address <factory_address> --calling-address <calling_address> --init-code-hash <init_code_hash> --gpu-device <gpu_device> --leading-zeroes <leading_zeroes> --total-zeroes <total_zeroes> --minimum-score <minimum_score> --backend metal2
 ```
 
 ### Example Usage
@@ -106,13 +107,19 @@ Using the Create2Factory contract with OpenCL device 0:
 export FACTORY="0x0000000000ffe8b47b3e2130213b802212439497"
 export CALLER="0x1234567890123456789012345678901234567890"
 export INIT_CODE_HASH="0x1234567890123456789012345678901234567890123456789012345678901234"
-cargo run --release --features opencl -- --factory-address $FACTORY --calling-address $CALLER --init-code-hash $INIT_CODE_HASH --gpu-device 0 --leading-zeroes-threshold 3 --total-zeroes-threshold 5 --backend opencl
+cargo run --release --features opencl -- --factory-address $FACTORY --calling-address $CALLER --init-code-hash $INIT_CODE_HASH --gpu-device 0 --leading-zeroes 3 --total-zeroes 5 --minimum-score 1000 --backend opencl
 ```
 
 Using Metal on macOS:
 
 ```sh
-cargo run --release --features metal -- --factory-address $FACTORY --calling-address $CALLER --init-code-hash $INIT_CODE_HASH --gpu-device 0 --leading-zeroes-threshold 3 --total-zeroes-threshold 5 --backend metal
+cargo run --release --features metal -- --factory-address $FACTORY --calling-address $CALLER --init-code-hash $INIT_CODE_HASH --gpu-device 0 --leading-zeroes 3 --total-zeroes 5 --minimum-score 1000 --backend metal
+```
+
+Using Metal2 on macOS (newer implementation):
+
+```sh
+cargo run --release --features metal -- --factory-address $FACTORY --calling-address $CALLER --init-code-hash $INIT_CODE_HASH --gpu-device 0 --leading-zeroes 3 --total-zeroes 5 --minimum-score 1000 --backend metal2
 ```
 
 ### Comparing Performance
@@ -122,29 +129,89 @@ To compare the performance between Metal and OpenCL backends:
 1. Run the program with the Metal backend and note the "rate" value (attempts per second):
 
     ```sh
-    cargo run --release --features metal -- --factory-address 0000000000000000000000000000000000000000 --calling-address 0000000000000000000000000000000000000000 --init-code-hash 0000000000000000000000000000000000000000000000000000000000000000 --gpu-device 0 --leading-zeroes-threshold 3 --total-zeroes-threshold 5 --backend metal
+    cargo run --release --features metal -- --factory-address 0000000000000000000000000000000000000000 --calling-address 0000000000000000000000000000000000000000 --init-code-hash 0000000000000000000000000000000000000000000000000000000000000000 --gpu-device 0 --leading-zeroes 3 --total-zeroes 5 --minimum-score 1000 --backend metal
     ```
 
 2. Run the program with the OpenCL backend and compare the "rate" value:
 
     ```sh
-    cargo run --release --features opencl -- --factory-address 0000000000000000000000000000000000000000 --calling-address 0000000000000000000000000000000000000000 --init-code-hash 0000000000000000000000000000000000000000000000000000000000000000 --gpu-device 0 --leading-zeroes-threshold 3 --total-zeroes-threshold 5 --backend opencl
+    cargo run --release --features opencl -- --factory-address 0000000000000000000000000000000000000000 --calling-address 0000000000000000000000000000000000000000 --init-code-hash 0000000000000000000000000000000000000000000000000000000000000000 --gpu-device 0 --leading-zeroes 3 --total-zeroes 5 --minimum-score 1000 --backend opencl
     ```
 
-3. The backend with the higher "rate" value is more efficient for your hardware.
+3. Run the program with the Metal2 backend for potentially better performance:
+
+    ```sh
+    cargo run --release --features metal -- --factory-address 0000000000000000000000000000000000000000 --calling-address 0000000000000000000000000000000000000000 --init-code-hash 0000000000000000000000000000000000000000000000000000000000000000 --gpu-device 0 --leading-zeroes 3 --total-zeroes 5 --minimum-score 1000 --backend metal2
+    ```
+
+4. The backend with the higher "rate" value is more efficient for your hardware.
 
 ### Tuning Performance
 
 You can adjust the `WORK_SIZE` constant in `src/lib.rs` to optimize performance for your specific GPU. Higher values may improve performance on more powerful GPUs, but could cause issues on less powerful ones.
+
+### Tuning Filtering Parameters
+
+The two-stage filtering system allows you to tune both GPU and CPU filtering independently:
+
+#### GPU Filtering (First Stage)
+
+-   `--leading-zeroes`: Controls how many leading zero bytes are required (default: 3)
+-   `--total-zeroes`: Controls how many total zero bytes are required (default: 5)
+-   Lower values = more candidates pass GPU filtering = higher CPU load
+-   Higher values = fewer candidates pass GPU filtering = lower CPU load
+
+#### CPU Filtering (Second Stage)
+
+-   `--minimum-score`: Controls the minimum reward score required (default: 1000)
+-   The reward score is calculated as: `leading_bytes³ + leading_nibbles² + total_zeroes`
+-   Lower values = more addresses considered valid = more results
+-   Higher values = fewer addresses considered valid = higher quality results
+
+#### Example Tuning Scenarios
+
+**High Performance, Lower Quality**:
+
+```sh
+--leading-zeroes 2 --total-zeroes 3 --minimum-score 500
+```
+
+**Balanced Performance and Quality**:
+
+```sh
+--leading-zeroes 3 --total-zeroes 5 --minimum-score 1000
+```
+
+**Lower Performance, Higher Quality**:
+
+```sh
+--leading-zeroes 4 --total-zeroes 7 --minimum-score 2000
+```
+
+### Two-Stage Filtering System
+
+The program uses a two-stage filtering approach for optimal performance and accuracy:
+
+1. **GPU Stage (First Pass)**:
+
+    - Uses `leading_zeroes` and `total_zeroes` thresholds for fast initial filtering
+    - GPU shaders quickly filter out addresses that don't meet basic criteria
+    - This reduces the number of candidates sent to the CPU
+
+2. **CPU Stage (Second Pass)**:
+    - Uses `minimum_score` threshold with sophisticated reward calculation
+    - Applies the `LeadingNibbleReward` scoring system
+    - Calculates score based on: `leading_bytes³ + leading_nibbles² + total_zeroes`
+    - Only addresses meeting the minimum score are considered valid solutions
 
 ### Output
 
 For each efficient address found, the program will:
 
 1. Display it in the terminal
-2. Append it to `efficient_addresses.txt` in the format: `<salt> => <address> => <value>`
+2. Append it to `efficient_addresses.txt` in the format: `<salt> => <address> => <score> (leading/total)`
 
-The value represents the approximate rarity of the address based on the number of leading and total zero bytes.
+The score represents the reward value calculated by the `LeadingNibbleReward` system, and the `(leading/total)` shows the leading and total zero byte counts for reference.
 
 ### Runtime Behavior
 
