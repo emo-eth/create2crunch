@@ -92,11 +92,11 @@ impl std::str::FromStr for GpuBackend {
 #[command(author, version, about, long_about = None)]
 pub struct Config {
     /// The address of the contract that will call CREATE2 (hex without 0x prefix)
-    #[arg(long, value_parser = parse_eth_address)]
+    #[arg(long, value_parser = parse_eth_address, default_value = "4e59b44847b379578588920ca78fbf26c0b4956c")]
     pub factory_address: [u8; 20],
 
     /// The address of the caller of the factory contract (hex without 0x prefix)
-    #[arg(long, value_parser = parse_eth_address)]
+    #[arg(long, value_parser = parse_eth_address, default_value = "0000000000000000000000000000000000000000")]
     pub calling_address: [u8; 20],
 
     /// The keccak-256 hash of the bytecode that will be used to initialize the new contract (hex without 0x prefix)
@@ -116,7 +116,7 @@ pub struct Config {
     pub total_zeroes_threshold: u8,
 
     /// Minimum score threshold for addresses (higher = more rare)
-    #[arg(long, default_value = "1000")]
+    #[arg(long, default_value = "132")]
     pub minimum_score: u64,
 
     /// GPU backend to use - "opencl", "metal", or "auto"

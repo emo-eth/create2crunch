@@ -8,11 +8,11 @@ use std::str::FromStr;
 #[command(author, version, about, long_about = None)]
 struct Args {
     /// Factory address (20 bytes)
-    #[arg(long)]
+    #[arg(long, default_value = "4e59b44847b379578588920ca78fbf26c0b4956c")]
     factory_address: String,
 
     /// Calling address (20 bytes)
-    #[arg(long)]
+    #[arg(long, default_value = "0000000000000000000000000000000000000000")]
     calling_address: String,
 
     /// Init code hash (32 bytes)
